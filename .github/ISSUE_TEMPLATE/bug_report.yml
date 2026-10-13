@@ -1,0 +1,65 @@
+name: Bug report
+description: Report a reproducible problem.
+body:
+  - type: input
+    id: hermes_version
+    attributes:
+      label: Hermes Agent version
+      description: Output of hermes --version
+    validations:
+      required: true
+  - type: input
+    id: claude_version
+    attributes:
+      label: claude version
+      description: Output of claude --version, or not installed
+    validations:
+      required: true
+  - type: input
+    id: codex_version
+    attributes:
+      label: codex version
+      description: Output of codex --version, or not installed
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS
+      description: Operating system and version
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: For a feature, describe the current workflow and proposed steps.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should happen?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What happens today?
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or additional context
+      description: Include only relevant logs with secrets and private paths removed.
+      render: text
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: I removed secrets and private paths from logs
+          required: true

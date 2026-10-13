@@ -1,0 +1,8 @@
+[
+  {"id": "summary", "expect": "summary", "prompt": "Use Hermes-Control to summarize the shop package, its modules, and their dependencies. Do not edit files."},
+  {"id": "check", "expect": "check", "prompt": "Use Hermes-Control to list the functions or methods in shop that have no direct test in tests/. Do not edit files."},
+  {"id": "routine", "expect": "routine", "prompt": "Use Hermes-Control to add clamp(value, minimum, maximum) to shop/pricing.py with tests. Verify with {verify}."},
+  {"id": "hard", "expect": "hard", "prompt": "Use Hermes-Control to find and fix why a 10% discount on a 100 unit cart charges 81 rather than 90. Trace the modules and add a regression test. Verify with {verify}."},
+  {"id": "review", "expect": "review", "prompt": "Use Hermes-Control to review feature/rounding against main. Explain any correctness issue with the changed rounding logic; do not edit files."},
+  {"id": "pinned", "expect": "review", "engine": "claude", "prompt": "@claude Use Hermes-Control to review feature/rounding against main for a financial rounding risk. Explain the problem; do not edit files."}
+]

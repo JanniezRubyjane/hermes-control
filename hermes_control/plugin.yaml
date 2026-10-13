@@ -1,0 +1,16 @@
+# `name` MUST match the directory Hermes finds it in: hermes_cli/plugins_cmd.py
+# resolves a plugin's toolset from disk as `<plugins dir>/<name>`, and
+# scripts/install.sh links this directory in as `~/.hermes/plugins/hermes_control`.
+name: hermes_control
+kind: standalone
+version: 0.1.0
+description: Delegate coding tasks to the claude and codex CLIs in isolated git worktrees
+author: JanniezRubyjane
+license: MIT
+# Without this, `_get_plugin_toolset_key` cannot resolve `control` from disk and
+# `hermes plugins enable hermes_control` never adds the toolset.
+provides_tools:
+  - control_dispatch
+  - control_status
+
+# Tested: macOS 26.7; Hermes Agent v0.21.6 (2026.9.24); claude 2.1.296; codex-cli 0.161.0.

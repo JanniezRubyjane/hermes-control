@@ -1,0 +1,33 @@
+name: checks
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install pytest
+        run: python -m pip install pytest==9.1.1
+      # Full-suite CI needs a pinned Hermes Agent checkout and is not set up yet.
+      - name: Standalone tests
+        run: python -m pytest --noconftest -q -p no:cacheprovider tests/test_export_public.py tests/test_flow_diagram.py
+      - name: Parse every Python file
+        run: |
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+          for path in sorted(Path('.').rglob('*.py')):
+              ast.parse(path.read_bytes(), filename=str(path))
+          PY
+      - name: Check shell syntax
+        run: |
+          for script in scripts/*.sh scripts/hc-update scripts/lib/*.sh; do
+            if [ "$script" != scripts/sandbox-check.sh ]; then
+              bash -n "$script"
+            fi
+          done
+          sh -n scripts/sandbox-check.sh

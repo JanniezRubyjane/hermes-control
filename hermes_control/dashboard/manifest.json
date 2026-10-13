@@ -1,0 +1,11 @@
+{
+  "name": "hermes_control",
+  "label": "Engines",
+  "description": "Sign-in status of the Hermes-Control engines (claude, codex) and the planner",
+  "icon": "Cpu",
+  "version": "0.1.0",
+  "tab": { "path": "/engines", "position": "after:models" },
+  "entry": "dist/index.js",
+  "css": "dist/style.css",
+  "api": "plugin_api.py"
+}

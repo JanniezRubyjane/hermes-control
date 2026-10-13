@@ -1,0 +1,6 @@
+# Hermes's own rules (encoding + event-loop blocking) plus pyflakes and import order.
+preview = true  # PLW1514 is a preview rule
+line-length = 120
+
+[lint]
+select = ["F", "I", "PLW1514", "ASYNC210", "ASYNC220", "ASYNC221", "ASYNC251"]

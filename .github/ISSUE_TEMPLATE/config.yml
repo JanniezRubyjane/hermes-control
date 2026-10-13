@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security reports
+    url: https://github.com/JanniezRubyjane/hermes-control/blob/main/SECURITY.md
+    about: Follow SECURITY.md to report vulnerabilities privately; do not use public issues.
+  - name: Questions and support
+    url: https://github.com/JanniezRubyjane/hermes-control/issues
+    about: Ask questions in GitHub issues; read SUPPORT.md for the support policy.

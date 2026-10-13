@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Update Hermes, then prove Hermes-Control still works on it.
+set -euo pipefail
+
+# Find the repo even when invoked through the installed hc-update symlink.
+self="${BASH_SOURCE[0]}"
+while [ -L "$self" ]; do
+    target="$(readlink "$self")"
+    case "$target" in
+        /*) self="$target" ;;
+        *) self="$(dirname "$self")/$target" ;;
+    esac
+done
+repo="$(cd "$(dirname "$self")/.." && pwd)"
+source "$repo/scripts/lib/hermes-python.sh"
+export HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+
+for arg in "$@"; do
+    if [ "$arg" = --check ]; then
+        hermes_result=0
+        hermes update "$@" || hermes_result=$?
+        # Read existing tracking information; fetching would change the repo.
+        if behind="$(git -C "$repo" rev-list --count 'HEAD..@{upstream}' 2>/dev/null)"; then
+            if [ "$behind" -gt 0 ]; then
+                echo "Hermes-Control is behind its upstream by $behind commit(s)."
+            else
+                echo "Hermes-Control is not behind its upstream."
+            fi
+            echo "(Based on locally recorded upstream; no fetch performed.)"
+        else
+            echo "Hermes-Control: cannot determine whether it is behind (no upstream tracking information)."
+        fi
+        exit "$hermes_result"
+    fi
+done
+
+hermes update "$@"
+resolve_hermes_python
+verify="$HERMES_HOME/control/verify"
+if [ ! -r "$verify/python-path" ] || [ "$(cat "$verify/python-path")" != "$HERMES_PYTHON" ]; then
+    "$repo/scripts/verify-setup.sh"
+fi
+
+echo
+echo "Checking Hermes-Control against this Hermes..."
+if ! "$repo/scripts/check.sh" -q; then
+    echo "hc-update: Hermes-Control's tests fail on this Hermes; see Troubleshooting in $repo/README.md" >&2
+    exit 1
+fi
+echo "Hermes-Control OK."
