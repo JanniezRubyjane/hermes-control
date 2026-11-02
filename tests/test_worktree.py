@@ -190,8 +190,11 @@ def test_worktree_diff_runs_hardened_git(repo, monkeypatch):
 
     # Capture the arguments passed to subprocess.run
     captured_calls = []
+    original_run = wt_mod.subprocess.run
 
     def capture_run(*args, **kwargs):
+        if "--git-common-dir" in args[0]:
+            return original_run(*args, **kwargs)
         captured_calls.append((args, kwargs))
         # Return a mock result
         class MockResult:
@@ -204,7 +207,7 @@ def test_worktree_diff_runs_hardened_git(repo, monkeypatch):
     # Call worktree_diff
     worktree_diff(result)
 
-    # Verify both git calls were made
+    # Verify both task git calls were made after resolving the admin directory
     assert len(captured_calls) == 2, f"Expected 2 git calls, got {len(captured_calls)}"
 
     # Get the hardened flags for diff command
@@ -223,7 +226,8 @@ def test_worktree_diff_runs_hardened_git(repo, monkeypatch):
     )
 
     # Verify env is hardened (not None)
-    assert diff_call_kwargs.get("env") is not None
+    assert diff_call_kwargs["env"]["GIT_WORK_TREE"] == str(result.path.resolve())
+    assert diff_call_kwargs["env"]["GIT_DIR"] != str(result.path / ".git")
     assert diff_call_kwargs.get("stdin") is subprocess.DEVNULL
 
 
@@ -261,7 +265,11 @@ def test_capture_reports_a_failed_add_not_just_a_failed_diff(repo, monkeypatch):
         stdout = ""
         stderr = ""
 
-    def fake_git(args, cwd, timeout=60):
+    original = wt_mod._run_git
+
+    def fake_git(args, cwd, timeout=60, **kwargs):
+        if "--git-common-dir" in args:
+            return original(args, cwd, timeout, **kwargs)
         return _Failing() if args[0] == "add" else _Ok()
 
     monkeypatch.setattr(wt_mod, "_run_git", fake_git)
@@ -272,8 +280,14 @@ def test_capture_reports_a_failed_add_not_just_a_failed_diff(repo, monkeypatch):
 
 def test_capture_reports_an_exception_as_a_failure_not_as_no_changes(repo, monkeypatch):
     result = create_task_worktree(str(repo), "t9", run_id="r1")
-    monkeypatch.setattr(wt_mod.subprocess, "run",
-                        lambda *a, **k: (_ for _ in ()).throw(OSError("no git")))
+    original_run = wt_mod.subprocess.run
+
+    def fail_task_git(*args, **kwargs):
+        if "--git-common-dir" in args[0]:
+            return original_run(*args, **kwargs)
+        raise OSError("no git")
+
+    monkeypatch.setattr(wt_mod.subprocess, "run", fail_task_git)
     diff, failure = capture_worktree_diff(result)
     assert diff == ""
     assert failure is not None and "no git" in failure
@@ -461,16 +475,16 @@ def test_concurrent_worktrees_commits_and_verify_checkout_lock(repo, monkeypatch
     active = 0
     guard = threading.Lock()
 
-    def git(args, cwd, timeout=60):
+    def git(args, cwd, timeout=60, **kwargs):
         nonlocal active
         mutation = args[0] in {"add", "worktree"} or "commit" in args
         if not mutation:
-            return original(args, cwd, timeout)
+            return original(args, cwd, timeout, **kwargs)
         with guard:
             active += 1
             assert active == 1, "repository mutations overlapped"
         try:
-            return original(args, cwd, timeout)
+            return original(args, cwd, timeout, **kwargs)
         finally:
             with guard:
                 active -= 1

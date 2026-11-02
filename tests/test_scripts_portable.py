@@ -36,8 +36,266 @@ def machine(tmp_path):
 
 
 def run(script, env, *args, repo=REPO):
+    # These fixtures test interpreter resolution with a wrapper, not a real venv.
+    if script == "verify-setup.sh":
+        args = ("--no-agy-copy", *args)
     return subprocess.run(["bash", str(repo / "scripts" / script), *args],
                           env=env, text=True, capture_output=True)
+
+
+@pytest.mark.parametrize("symlinked", [False, True])
+def test_check_pytest_rejects_shadowing_pytest(machine, symlinked):
+    root, _, _, env = machine
+    module = root / "shadow/pytest/__init__.py"
+    module.parent.mkdir(parents=True)
+    module.write_text('__version__ = "9.1.1"\n')
+    env["PYTHONPATH"] = str(module.parent.parent)
+    if symlinked:
+        farm = root / "farm"
+        farm.mkdir()
+        (farm / "pytest").symlink_to(module.parent, target_is_directory=True)
+        env["PYTHONPATH"] = str(farm)
+    result = subprocess.run(
+        [sys.executable, str(REPO / "scripts/lib/check-pytest.py"), "9.1.1"],
+        env=env, text=True, capture_output=True)
+    assert result.returncode == 2
+    assert result.stderr.startswith("check: ")
+    assert str(module) in result.stderr
+    assert "is not the uv overlay pytest==9.1.1" in result.stderr
+    assert len(result.stderr.splitlines()) == 1
+
+
+def test_check_pytest_rejects_wrong_version(machine):
+    root, _, _, env = machine
+    module = root / "wrong/pytest/__init__.py"
+    module.parent.mkdir(parents=True)
+    module.write_text('__version__ = "0.0"\n')
+    result = subprocess.run(
+        [sys.executable, "-S", "-c",
+         "import sys, runpy; sys.path.insert(0, sys.argv.pop(1)); "
+         "runpy.run_path(sys.argv.pop(1), run_name='__main__')",
+         str(module.parent.parent), str(REPO / "scripts/lib/check-pytest.py"), "9.1.1"],
+        env=env, text=True, capture_output=True)
+    assert result.returncode == 2
+    assert result.stderr.startswith("check: ")
+    assert "0.0" in result.stderr
+    assert str(module) in result.stderr
+    assert "is not the uv overlay pytest==9.1.1" in result.stderr
+
+
+@pytest.mark.parametrize("body, error", [
+    ('raise RuntimeError("broken\\nimport")\n', "RuntimeError"),
+    ("", "AttributeError"),
+])
+def test_check_pytest_reports_broken_pytest_import(machine, body, error):
+    root, _, _, env = machine
+    module = root / "broken/pytest/__init__.py"
+    module.parent.mkdir(parents=True)
+    module.write_text(body)
+    env["PYTHONPATH"] = str(module.parent.parent)
+    result = subprocess.run(
+        [sys.executable, "-S", str(REPO / "scripts/lib/check-pytest.py"), "9.1.1"],
+        env=env, text=True, capture_output=True)
+    assert result.returncode == 2
+    assert result.stderr.splitlines() == [
+        f"check: cannot import pytest ({error}); expected the uv overlay pytest==9.1.1"
+    ]
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.parametrize("available", [False, True])
+def test_check_pytest_message_says_not_overlay(machine, available):
+    root, _, _, env = machine
+    module = root / "overlay/pytest/__init__.py"
+    module.parent.parent.mkdir(parents=True)
+    if available:
+        module.parent.mkdir()
+        module.write_text('__version__ = "0.0"\n')
+    result = subprocess.run(
+        [sys.executable, "-S", "-c",
+         "import sys, runpy; sys.path.insert(0, sys.argv.pop(1)); "
+         "runpy.run_path(sys.argv.pop(1), run_name='__main__')",
+         str(module.parent.parent), str(REPO / "scripts/lib/check-pytest.py"), "9.1.1"],
+        env=env, text=True, capture_output=True)
+    assert result.returncode == 2
+    message = (
+        f"check: pytest 0.0 at {module} is not the uv overlay pytest==9.1.1"
+        if available else
+        "check: cannot import pytest (ModuleNotFoundError); expected the uv overlay pytest==9.1.1"
+    )
+    assert result.stderr.splitlines() == [message]
+
+
+def test_check_pytest_accepts_overlay_pytest(machine):
+    root, _, _, env = machine
+    module = root / "overlay/pytest/__init__.py"
+    module.parent.mkdir(parents=True)
+    module.write_text('__version__ = "9.1.1"\n')
+    result = subprocess.run(
+        [sys.executable, "-S", "-c",
+         "import sys, runpy; sys.path.insert(0, sys.argv.pop(1)); "
+         "runpy.run_path(sys.argv.pop(1), run_name='__main__')",
+         str(module.parent.parent), str(REPO / "scripts/lib/check-pytest.py"), "9.1.1"],
+        env=env, text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == ""
+
+
+@pytest.mark.parametrize("managed_path", [False, True])
+def test_check_sh_preflight_uses_pytest_environment(machine, managed_path):
+    root, bindir, log, env = machine
+    env["HERMES_PYTHON"] = str(executable(
+        root / "python", "#!/bin/sh\nexec " + shlex.quote(sys.executable) + ' "$@"\n'))
+    env["HERMES_PYTHON_PATH"] = env["PYTHONPATH"] if managed_path else ""
+    if managed_path:
+        site = root / "site"
+        site.mkdir()
+        (site / "__editable___hermes_agent_test_finder.py").write_text(
+            'MAPPING = {"hermes_cli": "unused"}\n')
+        env["HERMES_PYTHON_PATH"] += os.pathsep + str(site)
+    env.pop("PYTHONNOUSERSITE", None)
+    env["TMPDIR"] = str(root)
+    executable(bindir / "uv", '#!/bin/sh\n'
+               'printf "%s\\t%s\\t%s\\n" "$PYTHONPATH" "${PYTHONNOUSERSITE-unset}" "$*" >> "$CALLS"\n')
+    result = run("check.sh", env, "-m", "integration")
+    assert result.returncode == 0, result.stderr
+    calls = [line.split("\t", 2) for line in log.read_text().splitlines()]
+    assert len(calls) == 2
+    preflight, pytest_call = calls
+    assert "check-pytest.py 9.1.1" in preflight[2]
+    assert "-- python -m pytest -m integration" in pytest_call[2]
+    assert preflight[:2] == pytest_call[:2]
+    if managed_path:
+        first = Path(preflight[0].split(os.pathsep)[0])
+        assert first.name == "hermes-src"
+        assert first.parent.parent == root
+        assert first.parent.name.startswith("hermes-check.")
+        assert str(first) != env["HERMES_PYTHON_PATH"].split(os.pathsep)[0]
+        assert preflight[0].split(os.pathsep)[1:] == [str(site)]
+        assert preflight[1] == "1"
+    else:
+        assert preflight[:2] == [env["PYTHONPATH"], "unset"]
+
+
+def test_check_sh_stops_when_source_farm_fails(machine):
+    root, _, log, env = machine
+    env["HERMES_PYTHON"] = str(executable(
+        root / "python", '#!/bin/sh\n'
+        'case "$*" in *hermes-src-farm.py*) echo farm-broken >&2; exit 1 ;; esac\n'
+        'exec ' + shlex.quote(sys.executable) + ' "$@"\n'))
+    env["HERMES_PYTHON_PATH"] = env["PYTHONPATH"]
+    env["TMPDIR"] = str(root)
+    result = run("check.sh", env, "-q")
+    assert result.returncode == 2, result.stderr
+    diagnostics = [line for line in result.stderr.splitlines() if line.startswith("check: ")]
+    assert len(diagnostics) == 1
+    assert "Hermes source farm failed" in diagnostics[0]
+    assert "full Hermes import path cannot be used" in diagnostics[0]
+    assert "Hermes repo root's tests package would shadow this repo's tests" in diagnostics[0]
+    assert "farm-broken" in result.stderr
+    assert not log.exists() or log.read_text() == ""
+    assert not list(Path(env["TMPDIR"]).glob("hermes-check.*"))
+
+
+@pytest.mark.parametrize("managed_path", [False, True])
+def test_check_sh_stops_when_preflight_fails(machine, managed_path):
+    root, bindir, log, env = machine
+    env["HERMES_PYTHON"] = str(executable(
+        root / "python", "#!/bin/sh\nexec " + shlex.quote(sys.executable) + ' "$@"\n'))
+    env["HERMES_PYTHON_PATH"] = env["PYTHONPATH"] if managed_path else ""
+    if managed_path:
+        site = root / "site"
+        site.mkdir()
+        (site / "__editable___hermes_agent_test_finder.py").write_text(
+            'MAPPING = {"hermes_cli": "unused"}\n')
+        env["HERMES_PYTHON_PATH"] += os.pathsep + str(site)
+    executable(bindir / "uv", '#!/bin/sh\nprintf "uv %s\\n" "$*" >> "$CALLS"\n'
+               'case "$*" in *check-pytest.py*) exit 2 ;; esac\n')
+    result = run("check.sh", env)
+    assert result.returncode == 2, result.stderr
+    calls = log.read_text()
+    assert "check-pytest.py" in calls
+    assert "-m pytest" not in calls
+
+
+@pytest.mark.parametrize("managed_path", [False, True])
+def test_check_sh_preflight_precedes_pytest(machine, managed_path):
+    root, _, log, env = machine
+    python = executable(
+        root / "python", "#!/bin/sh\nexec " + shlex.quote(sys.executable) + ' "$@"\n')
+    env["HERMES_PYTHON"] = str(python)
+    env["HERMES_PYTHON_PATH"] = env["PYTHONPATH"] if managed_path else ""
+    if managed_path:
+        site = root / "site"
+        site.mkdir()
+        (site / "__editable___hermes_agent_test_finder.py").write_text(
+            'MAPPING = {"hermes_cli": "unused"}\n')
+        env["HERMES_PYTHON_PATH"] += os.pathsep + str(site)
+    result = run("check.sh", env, "-m", "integration")
+    assert result.returncode == 0, result.stderr
+    prefix = (
+        f"uv run --quiet --no-project --python {python} "
+        "--with pytest==9.1.1 --with PyYAML==6.0.3 -- python "
+    )
+    assert log.read_text().splitlines() == [
+        prefix + f"{REPO}/scripts/lib/check-pytest.py 9.1.1",
+        prefix + "-m pytest -m integration",
+    ]
+
+
+@pytest.mark.parametrize("managed_path", [False, True])
+def test_check_sh_provides_pyyaml_overlay_when_hermes_lacks_yaml(machine, managed_path):
+    root, bindir, _, env = machine
+    python = executable(
+        root / "python", "#!/bin/sh\nexec " + shlex.quote(sys.executable) + ' -S "$@"\n')
+    env["HERMES_PYTHON"] = str(python)
+    env["HERMES_PYTHON_PATH"] = env["PYTHONPATH"] if managed_path else ""
+    if managed_path:
+        site = root / "site"
+        site.mkdir()
+        (site / "__editable___hermes_agent_test_finder.py").write_text(
+            'MAPPING = {"hermes_cli": "unused"}\n')
+        env["HERMES_PYTHON_PATH"] += os.pathsep + str(site)
+    env["TMPDIR"] = str(root)
+    overlay = root / "uv-overlay"
+    executable(
+        bindir / "uv",
+        "#!/bin/sh\n"
+        'has_pytest=false\nhas_pyyaml=false\n'
+        'while [ "$#" -gt 0 ]; do\n'
+        ' case "$1" in\n'
+        '  pytest==9.1.1) has_pytest=true; shift ;;\n'
+        '  PyYAML==6.0.3) has_pyyaml=true; shift ;;\n'
+        '  --) shift; break ;;\n'
+        '  *) shift ;;\n'
+        ' esac\n'
+        'done\n'
+        f'overlay={shlex.quote(str(overlay))}\n'
+        'rm -rf "$overlay" && mkdir -p "$overlay"\n'
+        'if [ "$has_pytest" = true ]; then\n'
+        ' mkdir -p "$overlay/pytest"\n'
+        ' printf "__version__ = \\"9.1.1\\"\\n" > "$overlay/pytest/__init__.py"\n'
+        ' printf "import yaml\\nassert yaml.__version__ == \\"6.0.3\\"\\n" > "$overlay/pytest/__main__.py"\n'
+        'fi\n'
+        'if [ "$has_pyyaml" = true ]; then\n'
+        ' mkdir -p "$overlay/yaml"\n'
+        ' printf "__version__ = \\"6.0.3\\"\\n" > "$overlay/yaml/__init__.py"\n'
+        'fi\n'
+        'shift\n'
+        'if [ "$1" = -m ]; then\n'
+        ' shift\n'
+        f' exec {shlex.quote(sys.executable)} -S -c '
+        '"import runpy, sys; sys.path.insert(0, sys.argv[1]); '
+        'module = sys.argv[2]; sys.argv = [module] + sys.argv[3:]; '
+        'runpy.run_module(module, run_name=\\"__main__\\")" "$overlay" "$@"\n'
+        'fi\n'
+        f'exec {shlex.quote(sys.executable)} -S -c '
+        '"import runpy, sys; sys.path.insert(0, sys.argv[1]); '
+        'script = sys.argv[2]; sys.argv = sys.argv[2:]; '
+        'runpy.run_path(script, run_name=\\"__main__\\")" "$overlay" "$@"\n',
+    )
+    result = run("check.sh", env, "-q")
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.parametrize("script", ["check.sh", "verify-setup.sh"])
@@ -129,7 +387,7 @@ def test_update_refreshes_setup_when_interpreter_changed(machine, changed):
     repo = update_repo(machine)
     root, _, log, env = machine
     dest = Path(env["HERMES_HOME"]) / "control/verify"
-    dest.mkdir(parents=True)
+    (dest / "site/yaml").mkdir(parents=True)
     (dest / "python-path").write_text(str(root / ("old-python" if changed else "python")) + "\n")
     result = run("hc-update", env, repo=repo)
     assert result.returncode == 0, result.stderr

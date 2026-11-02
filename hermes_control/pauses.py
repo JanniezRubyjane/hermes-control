@@ -35,6 +35,10 @@ class Pause:
     resets_at: float | None  # the earliest time an engine may take it again
     paused_at: float
     rerouted: dict[str, Any] | None = None
+    # The engine group leader that was running the task, and its start time as `ps`
+    # prints it; None for a task that never started or a record from before these.
+    pid: int | None = None
+    started: str | None = None
 
     def control_task(self) -> ControlTask:
         return task_from_dict(self.task)
@@ -85,7 +89,9 @@ def _directory() -> Path:
 def save(record: Pause) -> None:
     path = _directory() / f"{record.id}.json"
     staging = path.with_suffix(".tmp")
-    staging.write_text(json.dumps(dataclasses.asdict(record), ensure_ascii=False), encoding="utf-8")
+    with os.fdopen(os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600),
+                   "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(dataclasses.asdict(record), ensure_ascii=False))
     os.replace(staging, path)
 
 

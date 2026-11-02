@@ -3,8 +3,8 @@
 # scripts/install.sh links this directory in as `~/.hermes/plugins/hermes_control`.
 name: hermes_control
 kind: standalone
-version: 0.1.0
-description: Delegate coding tasks to the claude and codex CLIs in isolated git worktrees
+version: 0.2.0
+description: Delegate coding tasks to the claude, codex and gemini CLIs in isolated git worktrees
 author: JanniezRubyjane
 license: MIT
 # Without this, `_get_plugin_toolset_key` cannot resolve `control` from disk and
@@ -13,4 +13,4 @@ provides_tools:
   - control_dispatch
   - control_status
 
-# Tested: macOS 26.7; Hermes Agent v0.21.6 (2026.9.24); claude 2.1.296; codex-cli 0.161.0.
+# Tested: macOS 26.7; agent plugin: Hermes Agent v0.22.5 (2026.9.24); desktop plugin: a Hermes desktop development build from upstream main, commit 4dc56fe (2026-10-23); claude 2.1.314; codex-cli 0.161.0; Antigravity CLI (agy) 1.4.12 on macOS.

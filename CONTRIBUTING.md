@@ -1,5 +1,10 @@
 # Contributing
 
+The public repository receives one commit per release, exported from the
+maintainer's development tree. Accepted pull requests are applied there and
+appear in the next release rather than being merged directly into the public
+repository. Contributors are credited in the CHANGELOG if they wish.
+
 Start with a failing test for the behavior you want to change, implement the
 change, then run the relevant tests. Install the plugin with `scripts/install.sh`
 and prepare its offline test environment once with `scripts/verify-setup.sh`.
@@ -44,17 +49,26 @@ examples must be presented as examples; the user's allow-list chooses the route.
    ```
 
 `scripts/verify-setup.sh` finds Hermes's Python using `HERMES_PYTHON` when set,
-the `hermes` launcher, or the install directory reported by `hermes --version`.
-If discovery fails, set `HERMES_PYTHON` to the interpreter that can import
-`hermes_cli` and rerun setup. It installs pytest 9.1.1 into
-`$HERMES_HOME/control/verify/site` (default `~/.hermes/control/verify/site`) for
-offline verification and records the interpreter. Rerun it after a Hermes update
-changes that interpreter. `scripts/check.sh` uses a temporary `uv` overlay with
-the same pytest version and may need network access on its first run.
+otherwise it follows `hermes --print-runtime-command` and records the repo and
+dependency import path loaded by `hermes_bootstrap`. Older launchers fall back to
+the launcher or the install directory reported by `hermes --version`.
+If discovery fails, set `HERMES_PYTHON` to the interpreter Hermes runs. For managed
+Hermes, also set `HERMES_PYTHON_PATH` to the repo root first, then the managed env
+site-packages, colon-separated: the bundled interpreter can import `hermes_cli`
+only with that bootstrap import path. Older Hermes interpreters import it alone
+and leave `HERMES_PYTHON_PATH` empty. Rerun setup. It installs pytest 9.1.1 and
+PyYAML 6.0.3 into `$HERMES_HOME/control/verify/site` (default
+`~/.hermes/control/verify/site`) for offline verification and records the
+interpreter. Rerun it after every Hermes update. A setup made before PyYAML was
+added must rerun `scripts/verify-setup.sh`; `hc-update` does this by itself when
+the overlay has no `yaml`. `scripts/check.sh` uses a
+temporary `uv` overlay with the same pytest and PyYAML versions and may need
+network access on its first run.
 
 Runtime dependencies are inherited from Hermes's Python environment: FastAPI
-for the dashboard API, Rich, and PyYAML. Keep those dependencies available in
-that environment; the offline pytest installation does not provide them.
+for the dashboard API and Rich. Keep those dependencies available in that
+environment; the offline verify overlay provides only pytest and PyYAML for the
+test suite.
 
 ## Public export
 
@@ -62,7 +76,7 @@ The maintainers' development notes are kept out of the public repository.
 Commit the intended release tree before exporting:
 
 ```sh
-scripts/export_public.sh /tmp/hermes-control-public
+scripts/export_public.sh /path/to/hermes-control-public
 ```
 
 The destination must be absent or empty. The script exports only HEAD, filters
@@ -73,8 +87,7 @@ fails the command except the exact fake-key fixture at
 the README against the release code before publishing it. Uncommitted edits are
 not exported.
 
-`docs/dev/leak-markers.txt` is a local, optional, unpublished list of extra
-case-insensitive markers.
+An optional, unpublished local marker list can add case-insensitive checks.
 
 Screenshots must be taken from a demo dashboard with the dashboard and browser
 set to UTC, emails replaced, and metadata chunks stripped.

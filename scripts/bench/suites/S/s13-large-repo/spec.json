@@ -1,0 +1,21 @@
+{
+  "id": "s13-large-repo",
+  "source": "S",
+  "kind": "large-repo",
+  "policy": "write",
+  "goal": "The stockflow report drops one tenant's stock when two tenants reuse an event id. Restore the documented behavior. Public API contracts (module names identify callable interfaces): Invariant: event identity is the pair (tenant, id), never a concatenated string or an id alone. These are opaque, case-sensitive, nonempty strings, preserving whitespace and separators. domain.identity.event_key(event) returns that tuple or raises ValueError(\"invalid event\") for invalid tenant/id. domain.events.normalize_event(event) validates a mapping with tenant, id, account (all nonempty strings) and delta (int, never bool), returning a new dict with exactly those four keys; extra fields are ignored and invalid input raises ValueError(\"invalid event\"). domain.projection.rebuild(events) consumes an iterable once and returns {(tenant,account):integer balance}. First occurrence of an identity applies its delta; a replay with the same normalized account and delta is ignored; differing account or delta for the same identity raises ValueError(\"conflicting event\"). Every intermediate balance must be >=0, else ValueError(\"negative balance\"); keep zero-balance keys. Equal account names in different tenants stay isolated. stockflow.storage.journal.empty_state() returns {\"events\":{},\"balances\":{}}; append_batch(state,events) applies these same rules to an existing state, with events keyed by event_key and values normalized events. It returns None and is atomic across the entire iterable, including exceptions from the iterator: leave both state mappings unchanged on failure; do not mutate incoming events. The state produced by empty_state/append_batch must be accepted by rebuild(state[\"events\"].values()) with equal balances. reporting.summary.report(events,tenant) returns {\"tenant\":tenant,\"accounts\":[{\"account\":account,\"balance\":balance}],\"total\":sum balances}, including only that tenant, accounts in lexicographic order and zero balances included. The report consumes events once and validates the whole stream, even rows belonging to another tenant; unknown tenant yields empty accounts and total 0. domain.identity.same_event(left,right) compares event identity; storage.keys.journal_key(event) returns the identity tuple; imports.dedup.unique_events(events) consumes an iterable once and returns the first occurrence of each identity in input order. These public functions share the same documented identity invariant. Existing tests and tests/run.py stay unchanged. The repository module map is in README.md.",
+  "verify": "python3 tests/run.py",
+  "hidden_dir": "hidden",
+  "hidden_cmd": "python3 tests/run.py",
+  "hidden_expect": {
+    "pattern": "^(\\d+) assertions groups passed$",
+    "min": 6
+  },
+  "protected_paths": [
+    "tests/test_public.py",
+    "tests/run.py"
+  ],
+  "repo": {
+    "builder": "tree:s13-large-repo"
+  }
+}

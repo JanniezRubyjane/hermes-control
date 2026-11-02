@@ -31,6 +31,28 @@ re-reads that status and the saved report without a network call by
 Hermes-Control. It neither reads Claude Code's stored credentials nor calls
 a subscription usage endpoint.
 
+### Antigravity (gemini) usage source
+
+This usage source is unofficial and local-only. When the `/engines` dashboard or
+watch line asks for Gemini usage, `hermes_control/agy_quota.py` finds the running
+Antigravity language server through the process list (`ps`), reads its local CSRF
+token from that process's arguments in memory, and discovers its listening port
+with `lsof`. It calls only `https://127.0.0.1` at that port; proxies and redirects
+are disabled. The token stays in memory for the request and is never stored on
+disk or logged. Discovery and request errors omit process arguments and headers.
+
+The reading is report-only and is never used to route or pause work. Dispatch
+never reads this quota. There is no separate setting to turn off the reader; in
+normal operation it runs only when the dashboard or watch line asks for Gemini
+usage. The optional benchmark can also explicitly request readings for its own
+quota guard, separately from task dispatch.
+
+The groups have independent quotas. The source shows the estimated snapshot age
+(or that it is unknown); the app may keep an old snapshot until refreshed. Buckets
+past their reset read as unknown; unused five-hour buckets show no reset time.
+This private app interface may break when agy updates, in which case usage reads
+as unknown.
+
 ## 3. Verified facts (2026-09-24)
 
 - **Report units.** The run report's `utilization` is a fraction (0-1), converted
@@ -38,7 +60,7 @@ a subscription usage endpoint.
 - **claude usage in a run.** `claude -p --output-format stream-json` emits
   `{"type": "rate_limit_event", "rate_limit_info": {"status": "allowed" |
   "allowed_warning" | "rejected", "resetsAt": <epoch>, "unifiedWindows":
-  {"five_hour": {"utilization": 0.27, "resetsAt": ...}, "seven_day": {...}}}}`.
+  {"five_hour": {"utilization": <fraction>, "resetsAt": ...}, "seven_day": {...}}}}`.
   The adapter already logs it as a `usage` event.
 - **codex usage.** `codex app-server` (stdio JSON-RPC, codex-cli 0.155.1):
   `initialize`, then `account/rateLimits/read` returns `rateLimits: {primary,
@@ -72,7 +94,7 @@ a subscription usage endpoint.
    once per run, as before) and its usage is under the cap and not blocked
    (checked before every task; readings are cached 60 s). The planner's engine
    runs it when it can; otherwise the other engine does, and `rerouted` says why
-   ("claude is at 85% of its 5-hour limit (cap 80%); resets 2026-09-24 02:49").
+   (for example, that the engine is over its configured cap, with its reset time).
    When neither can, the task is paused without a worktree.
 2. **A limit mid-task.** The engine's output shows a limit (claude:
    `rate_limit_event` with `status: rejected`, or an error result that says so;
@@ -101,19 +123,73 @@ a subscription usage endpoint.
    gets its worktree now. The run appends to the original run log and lands like
    any task (commit, then the sandboxed check). Another limit updates the record;
    any other outcome removes it. **Discard** removes the record and leaves the
-   worktree.
+   worktree. Resume is also refused while the earlier engine still runs: the
+   task's latest `spawned` event gives the engine's pid and start time, and
+   while that process group runs the answer is "the earlier engine (pid 12345)
+   is still running in its worktree; stop it or wait, then resume". When this
+   cannot be checked: "could not check whether the earlier engine (pid 12345) is
+   still running; resume once it has stopped". Hermes-Control never stops the
+   engine itself (it only sends signal 0); you stop it or wait. A pid now used
+   by another process (a different start time) counts as gone. On Windows the
+   check always answers "could not check", so Resume is refused for every task
+   that has a `spawned` event. Windows is untested.
+6. **Interrupted run.** The process that runs a dispatch can end before the run
+   finishes: an idle exit, a restart, a kill, a crash or a power loss. The OS
+   frees the run's live lock however the process dies. When a run is read
+   (`control_status`, the Runs view, the Runs list) and its log has no summary
+   event, the live lock is free, no resume lock is held, and nothing but planner
+   phases has been logged for 60 seconds, the run is reconciled from its log
+   (`hermes_control/recover.py`), however long ago it died. Each unsettled task
+   gets a pause record with the reason "the Hermes process running this run
+   ended before the task finished" and shows as paused, resumable from the
+   dashboard like a limit pause. A task that had not started is paused without
+   a worktree (Resume creates it); dependents of a paused task are paused as
+   usual. What the log already proves is kept: a task whose check passed stays
+   passed; a finished read-only task or a failed write task is settled, not
+   paused; a dependent of a task settled as failed is skipped as failed. A task
+   whose branch already moved past its base (the process died while landing) is
+   reported committed and unproven, never paused, with the reason "the Hermes
+   process running this run ended before the check finished", or "not verified:
+   no verify command was given" when the task had no verify command. Every
+   engine start logs a `spawned` event with the engine's pid and start time; the
+   pause record carries them too. A Hermes gateway started with `--idle-exit`
+   can exit during a long run once the CLI is closed; the run then becomes
+   paused. Keep the CLI open during a long run, or resume afterwards. On
+   Windows the reconcile needs flock, so it does nothing there.
 
 ## 5. Settings
 
 `plugins.entries.hermes_control.settings.limits.<engine>.max_percent`: an integer
 1-100, default 80. Written through Hermes's plugin-settings writer, like `models`.
 
+### Pausing an engine
+
+Use **Pause** / **Resume** on the Engines tab's codex or gemini card to take an
+engine out of rotation immediately. The setting is
+`plugins.entries.hermes_control.settings.engines.<name>.paused`, a boolean that
+defaults to `false`. Claude cannot be paused. The setting is read live before
+dispatch, fallback handover and resume, without restarting Hermes. A running
+task continues; new work follows `routing.fallback`, just as for a usage cap.
+Paused engines are held before reading usage, so codex's app-server is not
+started for them. A non-boolean pause value or a non-mapping engine entry holds
+only that engine, before reading usage, with a `pause setting is invalid` reason.
+Claude and other engines keep working, and the enabled engine list stays unchanged
+by a malformed pause value. The dashboard shows `pause_problem`; use the toggle
+to save a valid boolean and repair the pause value. Limits, paused-task listings
+and resume checks remain available.
+
+A pause keeps the login, enabled engine list and planner tool schema unchanged;
+the planner still lists the engine until a new Hermes session. If every allowed
+destination is paused, the task is saved with no reset time and becomes resumable
+when one destination is unpaused. Resume the task from the dashboard.
+
 ## 6. Dashboard API (prefix `/api/plugins/hermes_control`)
 
 | Route | Returns |
 |---|---|
-| `GET /limits?refresh=` | per engine `{cap, windows: [{label, used_percent, resets_at}], blocked, source, error, held_back}` |
+| `GET /limits?refresh=` | per engine `{cap, windows: [{label, used_percent, resets_at}], blocked, source, error, report_only, held_back, paused, pause_problem}` |
 | `PUT /limits` | body `{limits: {<engine>: {max_percent}}}`; 400 on a bad value |
+| `PUT /engines/{name}/paused` | body `{"paused": true\|false}`; returns `{engine, paused}`; 400 for claude, unknown/disabled engines or non-booleans; 403 for a managed setting |
 | `GET /paused` | paused tasks plus the state of resumes started from this dashboard |
 | `POST /paused/{id}/resume` | 202 and runs in the background; 409 with the reason when it cannot start |
 | `DELETE /paused/{id}` | removes the record |

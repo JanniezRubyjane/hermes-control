@@ -96,9 +96,9 @@ kills reuse `hermes_control/proctree.py`; the child environment is
 {
   "name": "hermes_control",
   "label": "Engines",
-  "description": "Sign-in status of the Hermes-Control engines (claude, codex) and the planner",
+  "description": "Sign-in status of the Hermes-Control engines (claude, codex, gemini) and the planner",
   "icon": "Cpu",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "tab": { "path": "/engines", "position": "after:models" },
   "entry": "dist/index.js",
   "css": "dist/style.css",
@@ -178,8 +178,17 @@ logins, and the orphaned device code simply expires.
   No valid report means unknown usage, which never holds work back. Codex keeps
   reading through its official `codex app-server`. Caps and mid-task limit
   switching follow `docs/limits-and-resume.md`.
+  A report-only engine's card shows no cap marker, cap colours or cap input;
+  it shows the "Report only: this reading never holds work back." line instead.
 - **Planner card**: configured provider + model, without checking its sign-in;
   a link to `/models` for the planner's sign-in flow.
+- **Pause / Resume** on codex and gemini cards shows the current pause state from
+  `GET /limits` and saves through `PUT /engines/{name}/paused`. New tasks go to
+  the next engine in `routing.fallback` immediately, without a new Hermes
+  session. Running tasks continue and logins stay signed in. The planner still
+  lists the engine until a new Hermes session. Claude has no pause toggle.
+  See [Pausing an engine](limits-and-resume.md#pausing-an-engine) for settings
+  and how to resume a task when all its destinations were paused.
 - **Model-list editor**: codex's own catalog; Claude aliases plus Hermes's built-in
   list. No account is contacted for the Claude model list.
 - Every fetch failure renders as an inline message on its card; the rest of the

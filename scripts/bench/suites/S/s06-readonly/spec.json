@@ -1,0 +1,20 @@
+{
+  "id": "s06-readonly",
+  "source": "S",
+  "kind": "readonly",
+  "policy": "read-only",
+  "goal": "We are planning test coverage for the document index. List public functions defined in textindex/formatting.py that have no direct call in any test_* function in tests/test_public.py. Direct means the function is called by its imported name in that test body; calls through another production function do not count. Do not edit files. End with exactly one line ANSWER: a, b, c, substituting the complete set of uncovered function names.",
+  "verify": "python3 tests/run.py",
+  "hidden_dir": "hidden",
+  "hidden_cmd": "python3 tests/run.py",
+  "protected_paths": [],
+  "repo": {
+    "builder": "tree:s06-readonly"
+  },
+  "expected_answer": [
+    "slug",
+    "initials",
+    "truncate"
+  ],
+  "answer_prefix": "ANSWER:"
+}

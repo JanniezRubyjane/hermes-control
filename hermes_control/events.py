@@ -114,7 +114,7 @@ class ControlResult:
     diff: str = ""
     unproven_reason: str | None = None
     limit: LimitHit | None = None
-    failure_mode: Literal["timeout", "stall", "engine-exit", "start-failure", "limit"] | None = None
+    failure_mode: Literal["timeout", "stall", "engine-exit", "start-failure", "limit", "guard"] | None = None
 
 
 def stamp(raws: Sequence[RawEvent], *, run_id: str, task_id: str, engine: str,

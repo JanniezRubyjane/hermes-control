@@ -1,0 +1,18 @@
+{
+  "id": "s02-bug",
+  "source": "S",
+  "kind": "bug",
+  "policy": "write",
+  "goal": "A customer buying 100.00 with a 10 percent coupon is charged 81.00 instead of 90.00 by Invoice.checkout. Fix the calculation. The invoice contract is subtotal of price times quantity, one percentage discount, then percentage tax, and ROUND_HALF_UP to cents only on the final payable amount. Coupon percentages outside 0..100 raise ValueError. Keep the checkout API and Decimal return type.",
+  "verify": "python3 tests/run.py",
+  "hidden_dir": "hidden",
+  "hidden_cmd": "python3 tests/run.py",
+  "hidden_expect": {
+    "pattern": "^(\\d+) assertions groups passed$",
+    "min": 8
+  },
+  "protected_paths": [],
+  "repo": {
+    "builder": "tree:s02-bug"
+  }
+}

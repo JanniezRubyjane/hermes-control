@@ -63,6 +63,40 @@ running, live streaming starts again. The run list also polls every 10 s, so new
 runs appear on their own. On narrow screens a
 row reads top to bottom.
 
+### Changes
+
+An expanded task with a commit has a **Changes** button. Opening it fetches the
+task's committed diff once (`GET /api/plugins/hermes_control/runs/RUN_ID/tasks/TASK_ID/diff`)
+and shows it as plain text, file by file. The diff runs from the task's recorded
+base to its commit, with git's external diff drivers and textconv turned off.
+Text that matches the pre-commit secret rules is shown as `«masked:RULE»`; use
+`git diff` in a terminal to see it. Large diffs are cut at 300 files, 3,000 lines
+per file or about 1 MB, and the page names the command for the full diff
+(`hermes control review-pack RUN_ID --diff`). The page needs the task branch: once
+the branch is deleted it says "branch gone". There is no merge button; the row's
+Copy button gives the `git merge` command.
+
+#### Review comments
+
+Use **+** in the diff line's gutter (visible on hover or keyboard focus) to write
+a comment, then **Save**. Each added or context line comments on the new side;
+each deleted line comments on the old side. Closing **Changes** keeps an unsaved
+draft until you reopen it.
+Comments can be edited or deleted. **Copy review note** copies a short note to
+paste into Hermes chat for a fix round. Pasted into Hermes chat, this note becomes the next task's goal and its commit message.
+The dashboard sends no task and has no merge button.
+
+Comments are private files outside the repo, under
+`HERMES_HOME/control/reviews/RUN_ID/TASK_ID.json`, even when reviewing `/tmp/demo`.
+They refer to the recorded commit; the copied note contains locations and
+comments, with sensitive text redacted, and no diff code. If a branch is gone or
+a line is cut from the page, saved comments appear under **Comments not on a
+shown line**. If another tab saves first, reload the review before editing again.
+
+The plugin's API refuses browser requests from any origin other than the
+dashboard itself (HTTP 403), so a page served from another local port cannot
+read diffs through it.
+
 ## Where the data comes from
 
 `hermes_control/runs.py` reads the run log (`~/.hermes/control/run-<id>.jsonl`).
@@ -70,8 +104,12 @@ Session events split a task into attempts. `rerouted`, `limit`, `paused` and
 `resumed` events mark decisions as they happen; `summary` events, written when a
 dispatch or a resume ends, settle tasks. A run whose tasks are all settled and at
 least one is paused has state `paused`; a resumed event makes it `running` again
-until it settles. A run with unsettled tasks and no event
-for 35 minutes (longer than a task's timeout) is shown as stopped. Logs from
+until it settles. A run whose Hermes process died is reconciled from its log when
+it is read: its unsettled tasks become paused and resumable, a passed check stays
+passed, and a task that already committed is shown as committed and unproven (see
+[limits-and-resume.md](limits-and-resume.md)). A run with unsettled tasks and no
+event for 35 minutes (longer than a task's timeout) is shown as stopped only where
+the lock cannot be checked (on Windows). Logs from
 before these events existed are read as well: checks settle their tasks, and the
 repo is found in the workers' worktree paths.
 

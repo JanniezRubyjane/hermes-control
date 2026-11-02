@@ -1,0 +1,18 @@
+{
+  "id": "s01-routine",
+  "source": "S",
+  "kind": "routine",
+  "policy": "write",
+  "goal": "Our parcel desk needs a per-service manifest for end-of-day reconciliation. Add summarize_by_service(shipments) in parcel.manifest. It accepts an iterable of Shipment objects and returns a list of dictionaries sorted by service, each with service, count, weight_grams and charge_cents. Sum individual quote results rather than quoting the combined weight; do not modify the shipments. Empty input returns an empty list. Keep summarize working.",
+  "verify": "python3 tests/run.py",
+  "hidden_dir": "hidden",
+  "hidden_cmd": "python3 tests/run.py",
+  "hidden_expect": {
+    "pattern": "^(\\d+) assertions groups passed$",
+    "min": 3
+  },
+  "protected_paths": [],
+  "repo": {
+    "builder": "tree:s01-routine"
+  }
+}

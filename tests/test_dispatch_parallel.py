@@ -176,8 +176,8 @@ def test_parallel_settings_fallback_precedes_plan(repo, monkeypatch, engines, ca
     assert "parallel settings are invalid" in caplog.text
     assert all(e["ok"] and e["commit"] for e in summary["tasks"])
     assert [(e["task_id"], e["kind"]) for e in events(summary)] == [
-        ("", "plan"), ("a", "result"), ("a", "commit"), ("a", "verify"),
-        ("b", "result"), ("b", "commit"), ("b", "verify"),
+        ("", "plan"), ("a", "spawned"), ("a", "result"), ("a", "commit"), ("a", "verify"),
+        ("b", "spawned"), ("b", "result"), ("b", "commit"), ("b", "verify"),
         ("", "summary"), ("", "planner"), ("", "planner")]
 
 
@@ -209,8 +209,9 @@ def test_slots_and_default_event_order(repo, monkeypatch, engines, setting, seco
     assert all(e["commit"] and e["verify"]["passed"] for e in summary["tasks"])
     if not overlap:
         assert [(e["task_id"], e["kind"]) for e in events(summary)] == [
-            ("", "plan"), ("a", "result"), ("a", "commit"), ("a", "verify"),
-            ("b", "result"), ("b", "commit"), ("b", "verify"),
+            ("", "plan"), ("a", "spawned"), ("a", "result"), ("a", "commit"),
+            ("a", "verify"), ("b", "spawned"), ("b", "result"), ("b", "commit"),
+            ("b", "verify"),
             ("", "summary"), ("", "planner"), ("", "planner")]
 
 

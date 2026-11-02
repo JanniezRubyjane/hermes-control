@@ -10,7 +10,7 @@ Settings live where Hermes keeps every plugin's settings,
         opus: hard bugs across modules   # shorthand: just the use_for text
 
 Saved settings store ``allowed`` as a list of ``{name, use_for, effort}`` and
-always name every engine: Hermes writes plugin settings by deep-merging them
+always name every enabled engine: Hermes writes plugin settings by deep-merging them
 into config.yaml, and a merge can replace a list but can never drop a mapping
 key, so a model removed from a mapping would silently stay allowed.
 
@@ -25,14 +25,20 @@ the plugin, so it refreshes with a new Hermes session.
 from __future__ import annotations
 
 import dataclasses
+import logging
 import re
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from .engines.base import ControlTask
 from .engines.registry import ENGINE_NAMES, get_adapter
+from .engines.settings import OPTIONAL_ENGINES
 
 PLUGIN_ID = "hermes_control"
+logger = logging.getLogger(__name__)
+_warned_disabled_engines: set[str] = set()
+_disabled_warning_lock = threading.Lock()
 
 # Model names become an argv value after `--model` / `-m`. A leading dash or any
 # whitespace would let a planner-chosen "model" pose as a flag; this shape covers
@@ -125,6 +131,12 @@ def parse_policy(raw: Any) -> dict[str, EnginePolicy]:
     policy: dict[str, EnginePolicy] = {}
     for engine, block in raw.items():
         if engine not in ENGINE_NAMES:
+            if engine in OPTIONAL_ENGINES:
+                with _disabled_warning_lock:
+                    if engine not in _warned_disabled_engines:
+                        _warned_disabled_engines.add(engine)
+                        logger.warning("models: engine %r is disabled; skipping its settings", engine)
+                continue
             raise ValueError(f"unknown engine {engine!r} in models settings; "
                              f"engines are {', '.join(ENGINE_NAMES)}")
         if block is None:
@@ -203,8 +215,8 @@ def describe(policy: Mapping[str, EnginePolicy]) -> tuple[str, str]:
 
 
 def to_settings(policy: Mapping[str, EnginePolicy]) -> dict[str, Any]:
-    """The canonical config.yaml shape of *policy*: every engine named, allowed as
-    a list, so saving it replaces what was there (see the module docstring)."""
+    """The canonical config.yaml shape: every enabled engine named, allowed as
+    a list. Omit disabled engines so the writer's deep merge retains their blocks."""
     settings: dict[str, Any] = {}
     for engine in ENGINE_NAMES:
         rules = policy.get(engine)

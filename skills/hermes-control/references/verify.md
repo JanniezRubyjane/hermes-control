@@ -1,11 +1,18 @@
 # Verify commands
 
-A claude worker can run the verify command through a script Hermes-Control
-pre-approves before launch. That check runs in the task worktree, so the
-worker can fix a failure before finishing. Its pass is not proof that the
-committed change works. A codex worker usually cannot run project tools inside
-its own sandbox. The controller commits the task's change and runs `verify`
-itself. Only an exit code of 0 clears `unproven_reason`.
+A claude write worker can run the verify command through a script
+Hermes-Control pre-approves before launch. That check runs in the task
+worktree, so the worker can fix a failure before finishing. Its pass is not
+proof that the committed change works. Codex write workers, and gemini write
+workers when agy allows headless commands, are told they may run the check in
+their own sandbox (`dispatch.with_check_guidance`); otherwise gemini is told to
+run no shell command. Only the controller's run is proof.
+A worker continuing after a limit move or resume refuses to run when its
+engine's settings directory changed: claude `.claude/`, codex `.codex/`, gemini
+`.agents/` or `.gemini/`. Codex also refuses to start when the base commit
+already contains `.codex/` files.
+The controller commits the task's change and runs `verify` itself. Only an exit
+code of 0 clears `unproven_reason`.
 
 The controller uses `/bin/sh` in a detached clean checkout of the task's commit,
 with no network and writes limited to that checkout and the temp directory.

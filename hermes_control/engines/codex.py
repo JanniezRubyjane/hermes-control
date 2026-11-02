@@ -57,6 +57,7 @@ def save_reasoning_summary(value: str) -> str:
 
 class CodexAdapter(EngineAdapter):
     name = "codex"
+    planner_note = "runs inside an OS-level sandbox and writes by default"
     sign_in_command = "codex login"
     # Codex config reference, `model_reasoning_effort`: "such as low, medium, high,
     # xhigh, max, or ultra. Available levels depend on the model." codex itself does

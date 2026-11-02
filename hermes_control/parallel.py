@@ -1,8 +1,12 @@
 """Opt-in task concurrency, read from Hermes's plugin settings."""
+import logging
 from collections.abc import Mapping
 from typing import Any
 
 from .engines.registry import ENGINE_NAMES
+from .engines.settings import OPTIONAL_ENGINES
+
+logger = logging.getLogger(__name__)
 
 
 def parse_parallel(raw: Any) -> dict[str, Any]:
@@ -24,6 +28,10 @@ def parse_parallel(raw: Any) -> dict[str, Any]:
         raise ValueError("parallel.per_engine must be a mapping")
     for engine, count in engines.items():
         if engine not in ENGINE_NAMES:
+            if engine in OPTIONAL_ENGINES:
+                logger.warning("parallel.per_engine: engine %r is disabled; skipping its settings",
+                               engine)
+                continue
             raise ValueError(f"parallel.per_engine: unknown key {engine!r}")
         if isinstance(count, bool) or not isinstance(count, int) or count < 1:
             raise ValueError(f"parallel.per_engine.{engine} must be an integer >= 1")

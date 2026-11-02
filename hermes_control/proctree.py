@@ -124,6 +124,59 @@ def stop_group(process, grace: float) -> None:
     _wait_group_gone(process, 0.5)
 
 
+def process_start_time(pid: int) -> str | None:
+    """The start time ``ps`` prints for *pid*, or None when it cannot be read.
+
+    Read with a fixed locale and zone so the gateway and the dashboard get the same
+    text for the same process; with the pid it tells a process from a reused pid.
+    """
+    try:
+        return _read_start_time(pid)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _read_start_time(pid: int) -> str | None:
+    """The ``ps`` start time of *pid*; None when no such pid. Raises when ps cannot run."""
+    result = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)],
+                            stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                            timeout=10, check=False,
+                            env={**os.environ, "LC_ALL": "C", "TZ": "UTC"})
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def group_still_running(pid: int, started: str | None) -> bool | None:
+    """Whether the engine group whose leader was *pid* (started at *started*) still runs.
+
+    True: the same leader runs, or the leader is gone but its group is not. False: the
+    group is gone, or *pid* now belongs to another process (a reused pid is its own
+    group leader, so the old group cannot have this pgid). None: cannot tell - ps cannot
+    run, *started* was never recorded, or the group probe failed. Windows has no process
+    groups to check, so it always answers None. Only signal 0 is ever sent.
+    """
+    if os.name == "nt":
+        return None
+    try:
+        current = _read_start_time(pid)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if current is not None:
+        if started is None:
+            return None
+        return current == started
+    try:
+        os.killpg(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return None
+    return True
+
+
 def wait_bounded(process, timeout: float) -> int | None:
     """Exit status, or None when *timeout* elapsed with the child still alive."""
     try:

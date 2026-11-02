@@ -551,3 +551,63 @@ def test_an_unknown_run_is_404(api, run_id):
     _, client = api
 
     assert client.get(f"/api/plugins/hermes_control/runs/{run_id}").status_code == 404
+
+
+def test_diagrams_list_and_detail(api, diagram_repo):
+    from hermes_control import diagram
+    import subprocess
+    _, client = api
+    sha = subprocess.check_output(["git", "-C", str(diagram_repo), "rev-parse", "HEAD"], text=True).strip()
+    record = {"id": "d-20261014-123456", "title": "App", "repo": str(diagram_repo),
+              "commit": sha, "kinds": ["module"], "status": "done", "reason": "",
+              "created_at": 1, "updated_at": 2, "counts": {}, "spec_author": "codex",
+              "url": "http://localhost/engines?diagram=d-20261014-123456", "views": [], "stages": [],
+              "ask": "design", "unknowns": [], "summary": "summary", "version": 1}
+    diagram.save_diagram(record)
+    response = client.get("/api/plugins/hermes_control/diagrams")
+    assert response.status_code == 200
+    row = response.json()["diagrams"][0]
+    assert set(row) == {"id", "title", "repo", "commit", "kinds", "status", "reason", "created_at",
+                        "updated_at", "counts", "spec_author", "url", "stale"}
+    assert row["stale"] is False
+    detail = client.get("/api/plugins/hermes_control/diagrams/" + record["id"])
+    assert detail.json() == {"diagram": record, "stale": False}
+    record["commit"] = "old"
+    diagram.save_diagram(record)
+    assert client.get("/api/plugins/hermes_control/diagrams").json()["diagrams"][0]["stale"] is True
+    record["repo"] = str(diagram_repo / "gone")
+    diagram.save_diagram(record)
+    assert client.get("/api/plugins/hermes_control/diagrams/" + record["id"]).json()["stale"] is None
+
+
+def test_diagram_unknown_and_malformed_ids_are_404(api):
+    _, client = api
+    assert client.get("/api/plugins/hermes_control/diagrams").json() == {"diagrams": []}
+    for ident in ("d-20261014-abcdef", "invalid", "d-20261014-ABCDEF", "..%2Fsecret"):
+        assert client.get("/api/plugins/hermes_control/diagrams/" + ident).status_code == 404
+
+
+def test_diagram_list_reads_head_once_per_repo_per_request(api, diagram_repo, monkeypatch):
+    from hermes_control import diagram
+    import subprocess
+    _, client = api
+    sha = subprocess.check_output(["git", "-C", str(diagram_repo), "rev-parse", "HEAD"], text=True).strip()
+    repos = [str(diagram_repo), str(diagram_repo / "gone")]
+    for i, (repo, stamped) in enumerate([(repos[0], "old"), (repos[0], sha),
+                                        (repos[0], "older"), (repos[1], sha), (repos[1], "old")]):
+        diagram.save_diagram({"id": f"d-20261014-00000{i}", "created_at": i,
+                              "repo": repo, "commit": stamped})
+    original = diagram.subprocess.run
+    reads = []
+    def spy(args, **kwargs):
+        if "rev-parse" in args:
+            reads.append(args[2])
+        return original(args, **kwargs)
+    monkeypatch.setattr(diagram.subprocess, "run", spy)
+    for _ in range(2):
+        response = client.get("/api/plugins/hermes_control/diagrams")
+        assert response.status_code == 200
+        stale = {row["id"]: row["stale"] for row in response.json()["diagrams"]}
+        assert list(stale.values()) == [None, None, True, False, True]
+        assert sorted(reads) == sorted(repos)
+        reads.clear()

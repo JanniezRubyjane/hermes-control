@@ -53,18 +53,29 @@ unlink_ours "$HOME/.local/bin/hc-update"
 if "$purge"; then
     control="$home/control"
     # verify-setup.sh, runlog.py, dispatch.py, limits.py, pauses.py,
-    # verify.py and slots.py create these paths. Retain all other control data.
+    # verify.py, slots.py, review_notes.py and diagram.py create these paths.
+    # Retain all other control data (including settings-backups/ and user files).
     rm -rf "$control/verify"
     for path in "$control"/run-*.jsonl "$control"/run-*.live.lock \
         "$control"/run-*.summary.lock "$control"/run-*.resume-*.lock \
         "$control"/usage-claude.json "$control"/usage-claude.json.* \
         "$control"/paused/*.json "$control"/paused/*.tmp \
         "$control"/checks/*.sh "$control"/slots/claude/slot-*.lock \
-        "$control"/slots/codex/slot-*.lock; do
+        "$control"/slots/codex/slot-*.lock "$control"/slots/gemini/slot-*.lock \
+        "$control"/diagrams/*.json "$control"/diagrams/.diagram-*.tmp; do
         if [ -f "$path" ] || [ -L "$path" ]; then rm -f "$path"; fi
     done
-    rmdir "$control/paused" "$control/checks" "$control/slots/claude" \
-        "$control/slots/codex" "$control/slots" "$control" 2>/dev/null || true
+    for review_dir in "$control"/reviews/*; do
+        if [ -L "$review_dir" ] || [ ! -d "$review_dir" ]; then continue; fi
+        for path in "$review_dir"/*.json "$review_dir"/.*-*.tmp; do
+            if [ -f "$path" ] || [ -L "$path" ]; then rm -f "$path"; fi
+        done
+    done
+    for dir in "$control"/reviews/* "$control/paused" "$control/checks" \
+        "$control/reviews" "$control/diagrams" "$control/slots/claude" \
+        "$control/slots/codex" "$control/slots/gemini" "$control/slots" "$control"; do
+        if [ -d "$dir" ] && [ ! -L "$dir" ]; then rmdir "$dir" 2>/dev/null || true; fi
+    done
     echo "purged plugin files under $control (including run logs)"
 else
     echo "kept $home/control and run logs; use --purge to remove them"

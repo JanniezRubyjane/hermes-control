@@ -1,0 +1,38 @@
+{
+  "id": "s11-ambiguous",
+  "source": "S",
+  "kind": "ambiguous",
+  "policy": "write",
+  "goal": "Repair billing/money.py, billing/invoice.py and billing/render.py using Decimal arithmetic from decimal strings (no binary floats). billing.money.parse_amount(text) strips surrounding whitespace from text, then accepts the resulting string if it represents a finite Decimal >= 0 and returns that Decimal; otherwise it raises ValueError(\"invalid amount\"). Non-string inputs, empty or whitespace-only strings, malformed Decimal strings, negative values and non-finite values are invalid amounts. billing.money.round_cents(amount) accepts a finite nonnegative Decimal and rounds it to cents under the policies below, returning a Decimal with exactly two digits after the decimal point, including trailing zeros. Follow the policies in POLICIES.md. When two stated policies disagree for an input, raise billing.money.AmbiguousRounding(\"half-cent tie requires policy\"), a ValueError subclass, for that input; do not choose a policy. Where they agree, return that result. Report each conflict on an AMBIGUITY: line: name the policies and explicitly describe their conflict (or name AmbiguousRounding), or describe the conflicting tie inputs numerically or in words. billing.invoice.calculate(lines, tax_rate=\"0\") consumes the lines iterable in a single pass; each line has a unique nonempty string id, an amount parsed through parse_amount, and qty a positive int (bool rejected). Empty or non-string ids and quantities that are non-int, bool, zero or negative raise ValueError(\"invalid line\"); duplicate ids raise ValueError(\"duplicate line id\"); invalid amounts raise parse_amount's ValueError(\"invalid amount\"). Multiply each amount by qty, round each extended line with round_cents, then sum the rounded line totals. Parse tax_rate through parse_amount, multiply this subtotal by that rate, and round tax with round_cents; propagate AmbiguousRounding from lines or tax. Return {\"lines\":[{\"id\":id,\"total\":formatted line total}],\"subtotal\":formatted subtotal,\"tax\":formatted tax,\"total\":formatted sum of subtotal and tax}, preserving input line order. All monetary strings use fixed-point decimal notation with exactly two digits after the decimal point, including trailing zeros; empty invoices return \"0.00\" for subtotal, tax and total and an empty lines list. Do not mutate inputs. Preserve the exact value when parsing decimal strings and computing products with up to 40 significant digits before the required cent rounding; 40 digits is an accuracy guarantee, not an input validation limit. Parsing, arithmetic and rounding must work even when the caller's decimal precision is lower than the values require, and must leave the caller's decimal context unchanged, including precision, rounding mode and flags. billing.render.render_invoice(result) emits one '<id>: <total>' line per line, followed by 'Subtotal: <subtotal>', 'Tax: <tax>', 'Total: <total>', joined by newline with exactly one final newline; a line id may contain <, >, & and must be preserved verbatim (plain text). Existing tests and tests/run.py stay unchanged.",
+  "verify": "python3 tests/run.py",
+  "hidden_dir": "hidden",
+  "hidden_cmd": "python3 tests/run.py",
+  "hidden_expect": {
+    "pattern": "^(\\d+) assertions groups passed$",
+    "min": 6
+  },
+  "protected_paths": [
+    "tests/test_public.py",
+    "tests/run.py"
+  ],
+  "repo": {
+    "builder": "tree:s11-ambiguous"
+  },
+  "answer_prefix": "AMBIGUITY:",
+  "expected_answer": [
+    "half-cent conflict",
+    "half-up",
+    "half-even"
+  ],
+  "answer_forbidden": [
+    "resolved"
+  ],
+  "answer_casefold": true,
+  "answer_patterns": [
+    "(?!.*\\bresolved\\b)(?=.*\\b(?:conflict\\w*|disagree\\w*|contradict\\w*|ambiguous|inconsisten\\w*|AmbiguousRounding)\\b)(?=.*\\baccounting\\b)(?=.*\\breconciliation\\b).+",
+    "(?!.*\\bresolved\\b)(?=.*\\b(?:conflict\\w*|disagree\\w*|contradict\\w*|ambiguous|inconsisten\\w*|AmbiguousRounding)\\b)(?=.*\\b(?:ROUND_)?half[- _]up\\b)(?=.*\\b(?:ROUND_)?half[- _]even\\b).+",
+    "(?!.*\\bresolved\\b)(?=.*\\bAmbiguousRounding\\b).+",
+    "(?!.*\\bresolved\\b).*(?<![\\d.])\\d+\\.\\d[02468]50*(?!\\d).*",
+    "(?!.*\\bresolved\\b)(?=.*\\bhalf[- ]cent\\s+tie(?:s)?\\b)(?=.*\\beven\\b).+"
+  ]
+}

@@ -14,6 +14,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import json
+import logging
 import os
 import subprocess
 import tempfile
@@ -25,8 +26,13 @@ from typing import Any, Callable, Mapping
 
 from .engines.base import engine_env
 from .engines.registry import ENGINE_NAMES, get_adapter
+from .engines.settings import OPTIONAL_ENGINES, read_paused
 from .model_policy import PLUGIN_ID
 from .proctree import group_popen_kwargs, stop_group
+
+logger = logging.getLogger(__name__)
+_warned_disabled_engines: set[str] = set()
+_disabled_warning_lock = threading.Lock()
 
 DEFAULT_CAP = 80
 CACHE_SECONDS = 60
@@ -57,6 +63,7 @@ class Usage:
     plan: str | None = None
     account: str | None = None  # the signed-in account (email) this reading is for
     error: str | None = None  # why there is no reading
+    report_only: bool = False
 
 
 def when(epoch: float | None) -> str:
@@ -74,6 +81,12 @@ def parse_caps(raw: Any) -> dict[str, int]:
         raise ValueError("limits must be a mapping of engine to {max_percent}")
     for engine, spec in raw.items():
         if engine not in ENGINE_NAMES:
+            if engine in OPTIONAL_ENGINES:
+                with _disabled_warning_lock:
+                    if engine not in _warned_disabled_engines:
+                        _warned_disabled_engines.add(engine)
+                        logger.warning("limits: engine %r is disabled; skipping its settings", engine)
+                continue
             raise ValueError(f"limits: unknown engine {engine!r}; known: {', '.join(ENGINE_NAMES)}")
         if isinstance(spec, Mapping):
             extra = set(spec) - {"max_percent"}
@@ -97,7 +110,7 @@ def read_caps() -> dict[str, int]:
 
 
 def save_caps(raw: Any) -> dict[str, dict[str, int]]:
-    """Validate, then write every engine through Hermes's plugin-settings writer."""
+    """Write enabled engines; the writer's deep merge retains disabled blocks."""
     from hermes_cli.plugins_state import save_plugin_setting
 
     settings = {engine: {"max_percent": cap} for engine, cap in parse_caps(raw).items()}
@@ -246,6 +259,8 @@ def _claude_usage(*, current_account: str | None = None) -> Usage:
 def _codex(refresh: bool = False) -> Usage:
     """codex's usage and account, from its app-server. *refresh* first renews codex's
     sign-in (``account/read`` with ``refreshToken``), so a plan bought since shows."""
+    if "codex" not in ENGINE_NAMES:
+        return Usage(engine="codex", error="codex is disabled")
     info = get_adapter("codex").probe()
     if info is None:
         return Usage(engine="codex", error="codex is not installed")
@@ -300,7 +315,14 @@ def _codex(refresh: bool = False) -> Usage:
 
 
 # Each takes *refresh*: renew the engine's sign-in first, where that shows a changed plan.
-_FETCHERS: dict[str, Callable[..., Usage]] = {"claude": _claude, "codex": _codex}
+def _gemini(refresh: bool = False) -> Usage:
+    from .agy_quota import fetch_quota
+
+    return fetch_quota()
+
+
+_FETCHERS: dict[str, Callable[..., Usage]] = {"claude": _claude, "codex": _codex, "gemini": _gemini}
+REPORT_ONLY_ENGINES = frozenset({"gemini"})
 _cache: dict[str, tuple[float, Usage]] = {}
 _generations: dict[str, int] = {}
 _lock = threading.Lock()
@@ -309,6 +331,8 @@ _claude_account_cache: tuple[float, str | None] | None = None
 
 def usage(engine: str, *, refresh: bool = False) -> Usage:
     """*engine*'s reading, at most CACHE_SECONDS old unless *refresh*."""
+    if engine == "codex" and engine not in ENGINE_NAMES:
+        return Usage(engine="codex", error="codex is disabled")
     with _lock:
         cached = _cache.get(engine)
         generation = _generations.get(engine, 0)
@@ -336,6 +360,8 @@ def forget(engine: str) -> None:
 
 def held_back(reading: Usage, *, cap: int, now: float) -> tuple[str, float | None] | None:
     """``(reason, until)`` when *reading* says to send no more work, else None."""
+    if reading.report_only:
+        return None
     if reading.error:
         return None
     if reading.blocked and (reading.blocked_until is None or reading.blocked_until > now):
@@ -354,9 +380,21 @@ def held_back(reading: Usage, *, cap: int, now: float) -> tuple[str, float | Non
     return f"{reading.engine} is at {spent} (cap {cap}%); {resets} {when(until)}", until
 
 
+def _pause_state(engine: str) -> tuple[bool, str | None]:
+    state = read_paused().get(engine, False)
+    problem = (f"{engine} pause setting is invalid (engines.{engine}.paused must be true or false)"
+               if state is None else None)
+    return state is True, problem
+
+
 def engine_hold(engine: str, *, caps: Mapping[str, int] | None = None,
                 refresh: bool = False) -> tuple[str, float | None] | None:
-    """Whether *engine* is held back right now, by its cap or a real limit."""
+    """Whether *engine* is held back by a dashboard pause, cap or real limit."""
+    paused, problem = _pause_state(engine)
+    if paused or problem:
+        return problem or f"{engine} is paused on the dashboard", None
+    if engine in REPORT_ONLY_ENGINES:
+        return None
     caps = caps if caps is not None else read_caps()
     return held_back(usage(engine, refresh=refresh), cap=caps.get(engine, DEFAULT_CAP),
                      now=time.time())
@@ -364,7 +402,10 @@ def engine_hold(engine: str, *, caps: Mapping[str, int] | None = None,
 
 def describe(engine: str, *, caps: Mapping[str, int], refresh: bool = False) -> dict[str, Any]:
     """One engine's reading for the dashboard."""
-    reading = usage(engine, refresh=refresh)
-    hold = held_back(reading, cap=caps.get(engine, DEFAULT_CAP), now=time.time())
+    paused, problem = _pause_state(engine)
+    reading = Usage(engine=engine) if paused or problem else usage(engine, refresh=refresh)
+    hold = ((problem or f"{engine} is paused on the dashboard", None) if paused or problem else
+            held_back(reading, cap=caps.get(engine, DEFAULT_CAP), now=time.time()))
     return {**asdict(reading), "cap": caps.get(engine, DEFAULT_CAP),
+            "paused": paused, "pause_problem": problem,
             "held_back": hold[0] if hold else None, "held_until": hold[1] if hold else None}

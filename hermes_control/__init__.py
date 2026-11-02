@@ -1,6 +1,6 @@
 """Hermes-Control: delegate coding work to external agent CLIs.
 
-Hermes plans and reviews; ``claude`` and ``codex`` do the editing, each in a
+Hermes plans and reviews; configured engines do the work, each in a
 throwaway git worktree. Registers two tools in the ``control`` toolset:
 ``control_dispatch`` starts the work, and ``control_status`` checks on a run
 ``control_dispatch`` reported as still running past its wait budget.
@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 from typing import Any, Mapping
 
 from . import model_policy
-from .engines.registry import ENGINE_NAMES, available_engines
+from .engines.registry import ENGINE_NAMES, available_engines, get_adapter
 
 logger = logging.getLogger(__name__)
 
@@ -22,34 +23,64 @@ logger = logging.getLogger(__name__)
 # default install), so a run that finishes on its own almost always beats it.
 DEFAULT_DISPATCH_WAIT_SECONDS = 300
 
-CONTROL_TOOL_DESCRIPTION = (
-    "Delegate coding tasks to external agent CLIs. Break the work into tasks that can "
-    "each be completed independently, choose an engine per task, and state why. Each "
-    "task runs in its own git worktree; a successful edit is committed to the task's "
-    "branch, and nothing reaches the working branch until a human merges it. Give every "
-    "write task a 'verify' command: a task is only reported proven (unproven_reason "
-    "null) when that command passes. The model field lists the models the user allows and what "
-    "each is for: when a listed use fits a task, choose that engine and model, unless the user "
-    "pinned an engine (@claude, @codex), which decides the engine. Otherwise, engines "
-    "differ: 'codex' runs inside an OS-level sandbox and writes by default; "
-    "'claude' is prompt-gated and reviews codex's diffs read-only (see the model "
-    "field for which model). Use policy 'read-only' for anything "
-    "that only needs to inspect the repo. An engine over the user's usage cap, or out of "
-    "usage, hands its tasks to the other engine; when neither can take a task it comes back "
-    "'paused' and the user resumes it from the dashboard - report it, never dispatch it again. "
-    "A run that is still going after the 'wait' budget comes back with state 'running' and a "
-    "run_id instead of the result: call control_status with that run_id to check on it, and "
-    "again later if it is still running - never dispatch the same tasks again. Workers "
-    "answer in English; report their results in the language the user writes in."
-)
+def build_description(fallback: Mapping[str, list[str]] | None = None) -> str:
+    """Planner text from enabled adapters and the configured routing order."""
+    # A disabled engine's list is kept for routing its old tasks; it does not
+    # change the text the planner sees.
+    legacy = ENGINE_NAMES == ("claude", "codex") and not any(
+        engine in ENGINE_NAMES for engine in (fallback or {}))
+    pins = ", ".join(f"@{engine}" for engine in ENGINE_NAMES)
+    order = ("codex", "claude") if legacy else ENGINE_NAMES
+    notes = "; ".join(f"'{engine}' {get_adapter(engine).planner_note}" for engine in order)
+    if legacy:
+        notes = notes.replace("reviews diffs", "reviews codex's diffs")
+    handover = "hands its tasks to the other engine; when neither can take a task it comes back "
+    if not legacy:
+        from .routing import fallback_order
 
-def build_schema(policy: Mapping[str, Any]) -> dict[str, Any]:
+        orders = []
+        for engine in ENGINE_NAMES:
+            entries = ([entry for entry in fallback[engine]
+                        if entry.partition("/")[0] in ENGINE_NAMES]
+                       if engine in (fallback or {}) else
+                       fallback_order(engine, fallback or {}, engines=ENGINE_NAMES))
+            orders.append(f"{engine} -> {', '.join(entries) or 'no fallback'}")
+        summary = "; ".join(orders)
+        handover = (f"hands its tasks to an available engine in the user's fallback order ({summary}); "
+                    "when no destination can take a task it comes back ")
+    return (
+        "Delegate coding tasks to external agent CLIs. Break the work into tasks that can "
+        "each be completed independently, choose an engine per task, and state why. Each "
+        "task runs in its own git worktree; a successful edit is committed to the task's "
+        "branch, and nothing reaches the working branch until a human merges it. "
+        "A change that looks like it contains a secret is not committed; the reason names "
+        "path:line and rule, and the worktree keeps the change. Give every "
+        "write task a 'verify' command: a task is only reported proven (unproven_reason "
+        "null) when that command passes. The model field lists the models the user allows and what "
+        "each is for: when a listed use fits a task, choose that engine and model, unless the user "
+        f"pinned an engine ({pins}), which decides the engine. Otherwise, engines "
+        f"differ: {notes}. Use policy 'read-only' for anything "
+        "that only needs to inspect the repo. An engine over the user's usage cap, or out of "
+        f"usage, {handover}"
+        "'paused' and the user resumes it from the dashboard - report it, never dispatch it again. "
+        "A run that is still going after the 'wait' budget comes back with state 'running' and a "
+        "run_id instead of the result: call control_status with that run_id to check on it, and "
+        "again later if it is still running - never dispatch the same tasks again. Workers "
+        "answer in English; report their results in the language the user writes in."
+    )
+
+
+CONTROL_TOOL_DESCRIPTION = build_description()
+
+
+def build_schema(policy: Mapping[str, Any],
+                 fallback: Mapping[str, list[str]] | None = None) -> dict[str, Any]:
     """The tool schema, with the allowed models and efforts from *policy* written into
     the ``model`` and ``effort`` descriptions the planner reads."""
     model_text, effort_text = model_policy.describe(policy)
     return {
         "name": "control_dispatch",
-        "description": CONTROL_TOOL_DESCRIPTION,
+        "description": build_description(fallback),
         "parameters": {
             "type": "object",
             "properties": {
@@ -182,7 +213,12 @@ def _dispatch_wait_seconds() -> float:
         entry = _plugin_settings_entry(load_config_readonly() or {}, model_policy.PLUGIN_ID) or {}
         settings = entry.get("settings")
         value = settings.get("dispatch_wait_seconds") if isinstance(settings, Mapping) else None
-        return float(value) if value is not None else float(DEFAULT_DISPATCH_WAIT_SECONDS)
+        if value is None:
+            return float(DEFAULT_DISPATCH_WAIT_SECONDS)
+        wait = float(value)
+        if not math.isfinite(wait) or wait < 0:
+            raise ValueError("dispatch_wait_seconds must be finite and non-negative")
+        return wait
     except Exception:  # noqa: BLE001 - a bad setting must never break dispatch
         logger.warning("hermes-control: dispatch_wait_seconds setting is invalid; using the default",
                        exc_info=True)
@@ -199,13 +235,32 @@ def control_dispatch_handler(args: dict[str, Any], **_kw: Any) -> str:
     # import: a module-level `from .dispatch import dispatch` would rebind this
     # package's attribute `dispatch` from the submodule to that function,
     # breaking monkeypatch in test_dispatch_run.py.
-    from .dispatch import start_dispatch
-    wait = args.get("wait")
-    wait = float(wait) if wait is not None else _dispatch_wait_seconds()
+    from .dispatch import MAX_STATUS_WAIT_SECONDS, start_dispatch
+    try:
+        from agent.runtime_cwd import resolve_agent_cwd
+    except ImportError:
+        parent_cwd = os.getcwd()
+    else:
+        parent_cwd = resolve_agent_cwd()
+    raw_wait = args.get("wait")
+    try:
+        wait = float(raw_wait) if raw_wait is not None else _dispatch_wait_seconds()
+    except (TypeError, ValueError, OverflowError):
+        wait = _dispatch_wait_seconds()
+    if not wait >= 0:
+        wait = _dispatch_wait_seconds()
+    wait = min(wait, MAX_STATUS_WAIT_SECONDS)
+    timeout = args.get("timeout")
+    try:
+        if not (isinstance(timeout, (int, float)) and not isinstance(timeout, bool)
+                and math.isfinite(timeout) and timeout >= 1):
+            timeout = None
+    except OverflowError:
+        timeout = None
     # session_id is the Hermes session calling the tool: the Runs view offers it, since
     # that conversation holds the planner's reasoning.
-    summary = start_dispatch(args.get("tasks") or [], parent_cwd=os.getcwd(),
-                             timeout=args.get("timeout"), planner_session=_kw.get("session_id"),
+    summary = start_dispatch(args.get("tasks") or [], parent_cwd=str(parent_cwd),
+                             timeout=timeout, planner_session=_kw.get("session_id"),
                              wait=wait)
     return json.dumps(summary, ensure_ascii=False)
 
@@ -239,7 +294,7 @@ def register(ctx) -> None:
         ctx.register_cli_command(
             name="control", help="Hermes-Control: watch delegated runs live",
             setup_fn=setup_cli, handler_fn=run_cli,
-            description="Commands of the Hermes-Control plugin (claude and codex workers).")
+            description="Commands of the Hermes-Control plugin (claude, codex and gemini workers).")
 
 
 def _policy_at_load() -> dict[str, Any]:
@@ -257,13 +312,23 @@ def _policy_at_load() -> dict[str, Any]:
 
 def register_tools(ctx) -> None:
     """Register ``control_dispatch`` and ``control_status`` in the ``control`` toolset."""
+    from .routing import read_fallback
+
+    policy = _policy_at_load()
+    try:
+        fallback = read_fallback(policy)
+    except ValueError:
+        logger.warning("hermes-control: routing settings are invalid; offering no fallback list",
+                       exc_info=True)
+        fallback = {}
+    schema = build_schema(policy, fallback)
     ctx.register_tool(
         name="control_dispatch",
         toolset="control",
-        schema=build_schema(_policy_at_load()),
+        schema=schema,
         handler=control_dispatch_handler,
         check_fn=control_available,
-        description=CONTROL_TOOL_DESCRIPTION,
+        description=schema["description"],
         emoji="\U0001f39b",  # control knobs
     )
     ctx.register_tool(

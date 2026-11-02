@@ -37,14 +37,51 @@ done
 hermes update "$@"
 resolve_hermes_python
 verify="$HERMES_HOME/control/verify"
-if [ ! -r "$verify/python-path" ] || [ "$(cat "$verify/python-path")" != "$HERMES_PYTHON" ]; then
-    "$repo/scripts/verify-setup.sh"
+recorded_path=''
+if [ -r "$verify/hermes-path" ]; then
+    recorded_path="$(cat "$verify/hermes-path")"
+fi
+expected_path="$(printf '%s' "$HERMES_PYTHON_PATH" | tr ':' '\n')"
+if [ ! -r "$verify/python-path" ] || [ "$(cat "$verify/python-path")" != "$HERMES_PYTHON" ] \
+    || [ "$recorded_path" != "$expected_path" ] \
+    || { [ -r "$verify/hermes-path" ] && [ ! -d "$verify/hermes-src" ]; } \
+    || [ ! -d "$verify/site/yaml" ]; then
+    setup_status=0
+    "$repo/scripts/verify-setup.sh" || setup_status=$?
+    if [ "$setup_status" -ne 0 ]; then
+        echo "hc-update: verify setup failed (exit $setup_status) after Hermes was updated; see the verify-setup lines above and Troubleshooting in $repo/README.md" >&2
+        exit "$setup_status"
+    fi
 fi
 
 echo
 echo "Checking Hermes-Control against this Hermes..."
+control_status=0
 if ! "$repo/scripts/check.sh" -q; then
     echo "hc-update: Hermes-Control's tests fail on this Hermes; see Troubleshooting in $repo/README.md" >&2
-    exit 1
+    control_status=1
+else
+    echo "Hermes-Control OK."
 fi
-echo "Hermes-Control OK."
+
+# Inspect only the built macOS renderer; keep this report isolated from the
+# update's status and never print bundle paths or write to the checkout.
+report_desktop_wordmark() (
+    root="${HERMES_PYTHON_PATH%%:*}"
+    if [ -z "$root" ]; then
+        root="$(PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$HERMES_PYTHON_PATH" "$HERMES_PYTHON" -c 'import hermes_cli, pathlib; print(pathlib.Path(hermes_cli.__file__).resolve().parent.parent)' 2>/dev/null)" || return 0
+    fi
+    [ -n "$root" ] || return 0
+    bundles=()
+    for bundle in "$root"/apps/desktop/release/mac*/Hermes.app/Contents/Resources/app.asar.unpacked/dist/assets/*.js; do
+        [ -f "$bundle" ] && bundles+=("$bundle")
+    done
+    [ "${#bundles[@]}" -gt 0 ] || return 0
+    if grep -l -F 'HERMES AGENT' "${bundles[@]}" >/dev/null 2>&1; then
+        echo 'Desktop wordmark: the app still writes HERMES AGENT; the Hermes Control plugin can rename it.'
+    else
+        echo 'hc-update: warning: the desktop app no longer writes "HERMES AGENT"; the Hermes Control plugin may show the old wordmark. Open a new chat in the app to check.' >&2
+    fi
+)
+report_desktop_wordmark || true
+exit "$control_status"

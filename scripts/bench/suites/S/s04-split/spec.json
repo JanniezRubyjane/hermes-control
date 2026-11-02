@@ -1,0 +1,18 @@
+{
+  "id": "s04-split",
+  "source": "S",
+  "kind": "split",
+  "policy": "write",
+  "goal": "Our telemetry dashboard needs three independent utilities. In telemetry/export.py add to_csv(samples): preserve input row order, emit header sensor,value and CSV rows with proper quoting, LF line endings and a final newline (header even when empty). In telemetry/duration.py add format_duration(seconds): accept nonnegative integers, reject negatives with ValueError, and render H:MM:SS with unbounded hours. In telemetry/series.py add moving_average(values, window): accept an iterable, reject window <= 0 with ValueError, return averages for complete trailing windows only, and return [] if there are fewer values than window. Preserve existing helpers.",
+  "verify": "python3 tests/run.py",
+  "hidden_dir": "hidden",
+  "hidden_cmd": "python3 tests/run.py",
+  "hidden_expect": {
+    "pattern": "^(\\d+) assertions groups passed$",
+    "min": 4
+  },
+  "protected_paths": [],
+  "repo": {
+    "builder": "tree:s04-split"
+  }
+}

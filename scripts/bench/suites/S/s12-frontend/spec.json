@@ -1,0 +1,21 @@
+{
+  "id": "s12-frontend",
+  "source": "S",
+  "kind": "frontend",
+  "policy": "write",
+  "goal": "Implement the dependency-free browser catalog in web/state.mjs, web/model.mjs, web/app.mjs and index.html; use ES modules and no packages. Rows have string name and number-or-null price; equal sort keys retain input order, and null prices sort last in both directions. web/state.mjs exports decodeHash(hash) and encodeHash(state). State is {q:\"\",sort:\"name\",dir:\"asc\",page:1} by default; sort is name or price, dir asc or desc, page is an ASCII integer 1..1000000. decodeHash accepts an optional leading #, URL percent escapes and + for space, ignores unknown keys, uses the last duplicate key and defaults each invalid field independently; malformed percent escapes cause the whole state to default. q is stripped but case-preserved. encodeHash emits all four keys in exactly q,sort,dir,page order as #q=...&sort=...&dir=...&page=..., using encodeURIComponent (spaces %20), after applying those same field defaults. web/model.mjs exports selectRows(rows,state,pageSize=3): case-insensitive substring filter on name using stripped q, name sort case-insensitively or numeric price sort, stable ties, then paginate. Return {rows: selected original row objects, total: filtered count, pages: max(1,ceil(total/pageSize)),page: clamped page}. Do not mutate rows or state; pageSize is a positive integer else RangeError(\"pageSize must be a positive integer\"). web/app.mjs exports mount(document,rows,browser) and automatically mounts the sample rows [{name:\"Basic\",price:10},{name:\"Plus\",price:null}] only when document and window exist. index.html supplies input#q, select#sort with name/price options, select#dir with asc/desc options, tbody#rows inside a table, button#prev, button#next and output#status, and loads web/app.mjs via type=\"module\". mount initializes controls from browser.location.hash, renders via selectRows with size 3, and canonicalizes browser.location.hash with the clamped page. Input on q and change on sort/dir reset page to 1; clicking prev/next clamps at the ends; browser hashchange reloads state and controls. Each rendered row has two td children containing literal name and price (null displays an em dash); use textContent, never HTML interpolation. status.textContent is exactly '<total> results; page <page>/<pages>'; prev/next disabled accurately at ends. Re-render replaces previous rows, and empty results still show page 1/1. tests/run.mjs and tests/test_public.mjs must stay unchanged. Verify with node tests/run.mjs.",
+  "verify": "node tests/run.mjs",
+  "hidden_dir": "hidden",
+  "hidden_cmd": "node tests/run.mjs",
+  "hidden_expect": {
+    "pattern": "^(\\d+) assertions groups passed$",
+    "min": 7
+  },
+  "protected_paths": [
+    "tests/test_public.mjs",
+    "tests/run.mjs"
+  ],
+  "repo": {
+    "builder": "tree:s12-frontend"
+  }
+}

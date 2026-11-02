@@ -9,6 +9,7 @@ carries the same privacy caveat as ``hermes debug share``.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from pathlib import Path
 from typing import Any, Sequence
@@ -32,7 +33,14 @@ def run_log_dir() -> Path:
     from hermes_constants import get_hermes_home
 
     directory = Path(get_hermes_home()) / "control"
-    directory.mkdir(parents=True, exist_ok=True)
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        if directory.stat().st_mode & 0o077:
+            directory.chmod(0o700)
+    except OSError:
+        # Privacy hardening only: a dir we cannot chmod (another owner) must not stop
+        # every run log from being written.
+        logger.warning("hermes-control: could not restrict %s to mode 0700", directory)
     return directory
 
 
@@ -65,6 +73,7 @@ class RunLog:
         if directory is not None:
             directory.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._created = False  # this RunLog has seen its file exist
         self._next_seq: dict[str, int] = {}
         # Set only after a summary actually reaches disk, never on a failed write.
         self.summary_seq: int | None = None
@@ -102,8 +111,17 @@ class RunLog:
                     payload=_redact(event.payload), raw_kind=event.raw_kind)
                 lines.append(redacted.to_json_line())
             try:
+                # Create a new log private (0600) first, then append through Path.open
+                # as before; an existing log keeps its mode.
+                if not self._created and not self.path.exists():
+                    try:
+                        os.close(os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                                         0o600))
+                    except FileExistsError:
+                        pass
                 with self.path.open("a", encoding="utf-8") as handle:
                     handle.write("\n".join(lines) + "\n")
+                self._created = True
                 for event in events:
                     if event.kind == "summary":
                         self.summary_seq = event.seq

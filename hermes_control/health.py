@@ -11,8 +11,10 @@ Windows use event timestamps, merge commit timestamps and session started_at,
 not file mtimes. Session counters are lifetime totals for sessions started in
 the window, not token-level timestamps. Planner processed tokens include input,
 cache read, cache write and output. Codex input already includes cache reads;
-Claude input excludes cache reads and writes, so those are added. Output already
-includes reasoning tokens. Worker tokens per task include all measured attempts.
+Claude and Gemini input exclude cache reads and writes, so those are added.
+Codex output already includes reasoning tokens. Gemini (agy) reports thinking
+tokens separately; whether its output includes them is unknown. Reasoning tokens
+are never added to output. Worker tokens per task include all measured attempts.
 Timing is elapsed wall time per task (including slot wait in worker time), with
 nearest-rank p90. Landing is result to verify (or commit when verify is absent);
 proof is verify to proof.
@@ -34,7 +36,10 @@ from pathlib import Path
 from statistics import median
 from typing import Any, Iterator
 
+from hermes_cli._subprocess_compat import harden_git_argv, noninteractive_git_env
+
 from . import lessons, runs
+from .worker_report import parse_findings
 
 LONG_SESSION_CALLS = 100
 _API_CALL = re.compile(
@@ -180,7 +185,7 @@ def _planner(cutoff: float, now: float, stats: list[dict]) -> dict:
     worker_tasks = {(row["run_id"], row["task_id"]) for row in worker_rows}
     worker_tokens = sum(row["input_tokens"] + row["output_tokens"] + (
         (row.get("cached_input_tokens") or 0) + (row.get("cache_write_tokens") or 0)
-        if row["engine"] == "claude" else 0) for row in worker_rows)
+        if row["engine"] in ("claude", "gemini") else 0) for row in worker_rows)
     result.update(worker_processed_tokens=worker_tokens if worker_rows else None,
                   worker_tasks=len(worker_tasks),
                   worker_processed_tokens_per_task=worker_tokens / len(worker_tasks) if worker_tasks else None,
@@ -277,10 +282,12 @@ def _planner(cutoff: float, now: float, stats: list[dict]) -> dict:
 
 
 def _git(repo: str | Path | None, *args: str) -> str:
-    command = ["git", "-c", "core.quotePath=false"]
+    command = ["-c", "core.quotePath=false"]
     if repo is not None:
         command += ["-C", str(repo)]
-    proc = subprocess.run([*command, *args], capture_output=True, text=True, timeout=60)
+    proc = subprocess.run(["git", *harden_git_argv([*command, *args])],
+                          capture_output=True, text=True, timeout=60,
+                          env=noninteractive_git_env())
     if proc.returncode:
         raise ValueError(proc.stderr.strip() or "git failed")
     return proc.stdout
@@ -465,14 +472,12 @@ def _reviews(tasks: list[dict], plans: dict, source: str, task_events: dict) -> 
                 level = _SEVERITY_LEVELS[label]
                 row["levels"][level] += 1
                 result["levels"][level] += 1
-        for line in reversed(text.splitlines()):
-            if re.search(r"\bNOT READY\b", line, re.I):
-                row["verdict"] = "NOT READY"
-                break
-            if re.search(r"\bREADY TO MERGE\b", line, re.I):
-                row["verdict"] = "READY TO MERGE"
-                ready += 1
-                break
+        verdict = parse_findings(text)["verdict"]
+        if verdict == "READY":
+            row["verdict"] = "READY TO MERGE"
+            ready += 1
+        elif verdict == "NOT READY":
+            row["verdict"] = "NOT READY"
         result["verdicts"][row["verdict"]] += 1
         if not row["levels"]["serious"] and not row["levels"]["moderate"]:
             minor_only += 1

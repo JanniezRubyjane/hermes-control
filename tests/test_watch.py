@@ -380,12 +380,25 @@ def test_the_real_hermes_cli_runs_it(tmp_path):
                     "log = RunLog('real1')\n"
                     "log.append(stamp([RawEvent(kind='plan', payload={'tasks': []})], run_id='real1',"
                     " task_id='', engine='', start_seq=0, now=1.0))\n"],
-                   env={**env, "PYTHONPATH": str(Path(watch.__file__).resolve().parents[1])},
+                   env={**env, "PYTHONPATH": str(Path(watch.__file__).resolve().parents[1])
+                        + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")},
                    check=True)
-    # What the installed `hermes` script runs, on the interpreter running this suite.
+    # What the installed `hermes` script runs, on this suite's interpreter
+    # or a venv of it when it is a store/system Python.
     launcher = "import sys; from hermes_cli.main import main; sys.exit(main())"
 
-    proc = subprocess.run([sys.executable, "-c", launcher, "control", "watch", "--once", "--no-usage"],
+    python = sys.executable
+    if sys.prefix == sys.base_prefix:
+        import venv
+
+        # Hermes refuses store/system Python without a committed environment in a
+        # fresh home; a venv keeps Hermes importable via system site packages and
+        # inherited PYTHONPATH while giving it a distinct sys.prefix.
+        venv_dir = tmp_path / "cli-venv"
+        venv.EnvBuilder(with_pip=False, symlinks=True, system_site_packages=True).create(venv_dir)
+        python = str(venv_dir / "bin" / "python")
+
+    proc = subprocess.run([python, "-c", launcher, "control", "watch", "--once", "--no-usage"],
                           capture_output=True, text=True, env=env, timeout=120)
 
     assert proc.returncode == 0, proc.stderr[-2000:]

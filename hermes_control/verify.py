@@ -18,6 +18,7 @@ import os
 import shlex
 import subprocess
 import tempfile
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -136,6 +137,12 @@ def _verify_env() -> dict[str, str]:
     return hermes_subprocess_env(inherit_credentials=False)
 
 
+def _sandbox_temp_dirs() -> tuple[Path, ...]:
+    """Resolved temp locations the workspace sandbox may allow writes to."""
+    return tuple(Path(path).resolve() for path in
+                 (tempfile.gettempdir(), "/tmp", "/private/tmp"))
+
+
 def _run(argv: list[str], cwd: Path, timeout: float) -> tuple[int | None, str, bool]:
     """``(exit code, output tail, timed out)``; the exit code is None on timeout."""
     process = subprocess.Popen(
@@ -181,6 +188,48 @@ def run_verify(command: str, worktree_path: Path, *, codex_path: str | None,
     if code != 0 or _PROBE_MARKER not in output:
         detail = " ".join(output.split())[-300:] or f"exit {code}"
         return _not_run(command, f"not verified: the sandbox did not start ({detail})")
+
+    # Running a command is not proof of containment: some hosts run it unconfined.
+    # Use the check's HOME contract and a unique name, avoiding existing user files
+    # and collisions between concurrent verifications.
+    containment_reason = "not verified: the sandbox did not block a write outside the checkout"
+    try:
+        home = _verify_env().get("HOME")
+        unwritable_reason = "not verified: cannot test sandbox containment because HOME is not writable"
+        try:
+            if not home or not Path(home).is_dir():
+                return _not_run(command, unwritable_reason)
+        except OSError:
+            return _not_run(command, unwritable_reason)
+        probe = Path(home) / f".hermes-control-sandbox-probe-{uuid.uuid4().hex}"
+        if not probe.is_absolute() or probe.resolve().is_relative_to(worktree_path.resolve()):
+            return _not_run(command, containment_reason)
+        try:
+            fd = os.open(probe, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                os.close(fd)
+            finally:
+                probe.unlink()
+        except OSError:
+            return _not_run(command, unwritable_reason)
+        if any(probe.resolve().is_relative_to(directory) for directory in _sandbox_temp_dirs()):
+            return _not_run(command, "not verified: cannot test sandbox containment because "
+                                     "HOME is inside the temp dir the sandbox may write")
+        try:
+            code, _, timed_out = _run(
+                sandbox_argv(codex_path, worktree_path, f': > "$HOME/{probe.name}"'),
+                worktree_path, _PROBE_TIMEOUT_SECONDS)
+        except (OSError, subprocess.SubprocessError):
+            code, timed_out = None, False
+        created = probe.exists() or probe.is_symlink()
+        if created:
+            probe.unlink()
+        if timed_out and (probe.exists() or probe.is_symlink()):
+            probe.unlink()
+        if code is None or code == 0 or timed_out or created:
+            return _not_run(command, containment_reason)
+    except (OSError, subprocess.SubprocessError):
+        return _not_run(command, containment_reason)
 
     try:
         code, output, timed_out = _run(sandbox_argv(codex_path, worktree_path, command),

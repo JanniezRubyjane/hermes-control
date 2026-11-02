@@ -1,0 +1,23 @@
+{
+  "id": "s05-review",
+  "source": "S",
+  "kind": "review",
+  "policy": "read-only",
+  "goal": "Please review feature/x against main for the seat-reservation service. Read each API contract and identify functions whose changed behaviour violates it; include a concrete example for each finding. Do not change files. End your review with exactly one line FINDINGS: <comma-separated function names> containing only functions with real defects.",
+  "verify": "python3 tests/run.py",
+  "hidden_dir": "hidden",
+  "hidden_cmd": "python3 tests/run.py",
+  "protected_paths": [],
+  "repo": {
+    "builder": "tree:s05-review"
+  },
+  "expected_answer": [
+    "reserve",
+    "release",
+    "quote_fee"
+  ],
+  "answer_prefix": "FINDINGS:",
+  "answer_forbidden": [
+    "availability"
+  ]
+}

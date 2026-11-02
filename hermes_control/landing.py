@@ -13,7 +13,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from . import proof
+from . import proof, secret_scan
 from .engines.base import ControlTask
 from .events import EMPTY_DIFF_REASON, ControlResult, RawEvent
 from .verify import VerifyOutcome, run_verify
@@ -119,9 +119,11 @@ def land(task: ControlTask, result: ControlResult, worktree: TaskWorktree, *,
     if not result.diff:
         return Landing(None, None, EMPTY_DIFF_REASON)
 
-    sha, failure = commit_worktree(worktree, message=commit_message(task, run_id))
+    sha, failure = commit_worktree(worktree, message=commit_message(task, run_id),
+                                   before_commit=secret_scan.scan)
     if sha is None:
-        reason = f"not committed: {failure or 'git found nothing to commit'}"
+        reason = (failure if failure and failure.startswith("not committed:") else
+                  f"not committed: {failure or 'git found nothing to commit'}")
         return Landing(None, None, reason,
                        (RawEvent(kind="commit", payload={"sha": None, "reason": reason}),))
     committed = RawEvent(kind="commit", payload={"sha": sha, "branch": worktree.branch})
@@ -135,9 +137,14 @@ def land(task: ControlTask, result: ControlResult, worktree: TaskWorktree, *,
         return Landing(sha, outcome, reason, tuple(events), evidence, tuple(warnings))
 
     settings = proof.parse_settings(None)
+    changed = {}
+    try:
+        changed = proof.changed_paths(worktree, sha)
+    except Exception:  # noqa: BLE001 - advisory inspection cannot affect verification
+        logger.warning("hermes-control: could not inspect task %s for changed paths", task.id,
+                       exc_info=True)
     try:
         settings = proof.read_settings()
-        changed = proof.changed_paths(worktree, sha)
         warnings = proof.advisory_warnings(task, worktree, sha, changed, settings["test_globs"])
     except Exception:  # noqa: BLE001 - advisory inspection cannot affect verification
         logger.warning("hermes-control: could not inspect task %s for check gaming", task.id,
@@ -146,6 +153,28 @@ def land(task: ControlTask, result: ControlResult, worktree: TaskWorktree, *,
         paths = committed_claude_paths(worktree, sha)
         warning = (f"warning: committed diff changes .claude/ ({', '.join(paths)}); "
                    "review Claude settings before merging" if paths else None)
+        # Advisory inspection must never prevent verification of any engine.
+        try:
+            for directory in (".agents", ".gemini"):
+                paths = sorted(path for path in changed
+                               if path.split("/", 1)[0].casefold() == directory)
+                if paths:
+                    detail = ("agy runs .agents/hooks.json and loads these settings"
+                              if directory == ".agents" else "agy loads these .gemini settings")
+                    agy_warning = (f"warning: committed diff changes {directory}/ ({', '.join(paths)}); "
+                                   f"{detail} in any later agy session in this repo")
+                    warning = "; ".join(filter(None, (warning, agy_warning)))
+            paths = sorted(path for path in changed
+                           if path.split("/", 1)[0].casefold() == ".codex")
+            if paths:
+                codex_warning = (
+                    f"warning: committed diff changes .codex/ ({', '.join(paths)}); "
+                    "codex loads project .codex settings in trusted repos, including the "
+                    "post-commit verify; review them before merging")
+                warning = "; ".join(filter(None, (warning, codex_warning)))
+        except Exception:  # noqa: BLE001 - warnings cannot affect verification
+            logger.warning("hermes-control: could not inspect task %s for agy settings", task.id,
+                           exc_info=True)
         if not task.verify:
             reason = f"{NO_VERIFY_REASON}; {warning}" if warning else NO_VERIFY_REASON
             return landed(reason)

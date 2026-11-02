@@ -1,0 +1,21 @@
+{
+  "id": "s03-refactor",
+  "source": "S",
+  "kind": "refactor",
+  "policy": "write",
+  "goal": "Archive catalog utilities have outgrown archivekit.py. Split that module into an archivekit package with paths.py for logical paths, catalog.py for row operations and codec.py for serialization. Preserve every public function through imports from archivekit, including argument defaults, return values, ordering, copying and exceptions. Leave at most a compatibility shim at archivekit.py. Existing tests are part of our compatibility contract and must stay unchanged.",
+  "verify": "python3 tests/run.py",
+  "hidden_dir": "hidden",
+  "hidden_cmd": "python3 tests/run.py",
+  "hidden_expect": {
+    "pattern": "^(\\d+) assertions groups passed$",
+    "min": 6
+  },
+  "protected_paths": [
+    "tests/test_public.py",
+    "tests/run.py"
+  ],
+  "repo": {
+    "builder": "tree:s03-refactor"
+  }
+}

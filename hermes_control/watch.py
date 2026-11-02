@@ -78,7 +78,8 @@ def _task(task: dict[str, Any], *, now: float) -> list[RenderableType]:
         lines.append(_para(f"“{_one_line(task['why'])}”", 4, "italic dim"))
     moved = task["rerouted"]
     if moved:
-        lines.append(_para(f"↪ moved from {moved.get('from')}: {moved.get('reason')}", 4, "yellow"))
+        action = "stays on" if moved.get("stayed") else "moved from"
+        lines.append(_para(f"↪ {action} {moved.get('from')}: {moved.get('reason')}", 4, "yellow"))
 
     last = task["attempts"][-1] if task["attempts"] else None
     for attempt in task["attempts"]:
@@ -147,9 +148,11 @@ def _usage_line() -> Text:
         windows = " · ".join(
             f"{w['label']} {w['used_percent']:.0f}%" if w["used_percent"] is not None
             else f"{w['label']} unknown" for w in reading["windows"])
-        line.append(f"{engine} {windows} (cap {reading['cap']}%)",
-                    style="red" if reading["held_back"] else "")
-        if reading["held_back"]:
+        report_only = reading.get("report_only", False)
+        suffix = "report only" if report_only else f"cap {reading['cap']}%"
+        holding = reading["held_back"] and not report_only
+        line.append(f"{engine} {windows} ({suffix})", style="red" if holding else "")
+        if holding:
             line.append(" holding work back", style="red")
     return line
 
@@ -223,9 +226,26 @@ def watch(run_id: str | None = None, *, once: bool = False, interval: float = 1.
 
 # --- `hermes control` --------------------------------------------------------------
 
+class _AuthorModelAction(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):
+        namespace.author_model = values
+        namespace.codex_model = values
+
+
 def setup_cli(parser: argparse.ArgumentParser) -> None:
     """Build ``hermes control``'s arguments (Hermes hands over the subparser)."""
     commands = parser.add_subparsers(dest="control_command", metavar="<command>")
+    diagram = commands.add_parser("diagram", help="read and review repository diagrams for the dashboard")
+    diagram.set_defaults(author_model=None, codex_model=None)
+    diagram.add_argument("--repo", metavar="PATH", help="repository (default: current directory)")
+    diagram.add_argument("--ask", required=True, metavar="TEXT", help="design or workflow to explain")
+    diagram.add_argument("--kind", action="append", choices=("module", "flow", "sequence"),
+                         help="view to include (repeatable; default: module and flow)")
+    diagram.add_argument("--author-model", "--codex-model", dest="codex_model",
+                         action=_AuthorModelAction, help="model for author spec and fix tasks")
+    diagram.add_argument("--claude-model", help="model for claude review and final fix tasks")
+    diagram.add_argument("--lang", default="en", help="language for diagram prose (default: en)")
+    diagram.add_argument("--json", action="store_true", help="print the record as JSON")
     follow = commands.add_parser(
         "watch", help="follow Hermes-Control runs live in this terminal",
         description="Show the newest Hermes-Control run and keep it up to date: each task, "
@@ -317,7 +337,8 @@ def stats(limit: int = 30, *, as_json: bool = False,
                 "median_output_tokens": median(recorded_output) if recorded_output else None,
                 "reasoning_pct": (100 * sum(row["reasoning_tokens"]
                                                for row in recorded_reasoning) / reasoning_output
-                                  if reasoning_output else 0.0) if recorded_reasoning else None,
+                                  if reasoning_output else 0.0)
+                if engine != "gemini" and recorded_reasoning else None,
             })
         summaries.sort(key=lambda group: -group["n"])
         if as_json:
@@ -378,6 +399,38 @@ def stats(limit: int = 30, *, as_json: bool = False,
 
 
 def run_cli(args: argparse.Namespace) -> int:
+    if getattr(args, "control_command", None) == "diagram":
+        from pathlib import Path
+        from . import diagram, diagram_pipeline
+        from .dispatch import dispatch
+
+        def progress(tasks, *, parent_cwd):
+            stage = tasks[0]["why"].removeprefix("diagram pipeline: ")
+            print(f"{stage} started", file=sys.stderr, flush=True)
+            try:
+                result = dispatch(tasks, parent_cwd=parent_cwd)
+            except Exception:
+                print(f"{stage} finished: failed", file=sys.stderr, flush=True)
+                raise
+            print(f"{stage} finished", file=sys.stderr, flush=True)
+            return result
+
+        try:
+            record = diagram_pipeline.run(str(Path(args.repo or Path.cwd()).resolve()), args.ask,
+                                          args.kind, codex_model=args.codex_model,
+                                          claude_model=args.claude_model, lang=args.lang, dispatch_fn=progress)
+        except diagram.DiagramError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        if args.json:
+            print(json.dumps(record, ensure_ascii=False))
+        else:
+            print(record["title"])
+            print(record["summary"])
+            print("Counts: " + ", ".join(f"{key}={value}" for key, value in record["counts"].items()))
+            print(record["status"] + (f": {record['reason']}" if record["reason"] else ""))
+            print(record["url"])
+        return 0 if record["status"] == "done" else 1
     if getattr(args, "control_command", None) == "health":
         from . import health
 

@@ -32,7 +32,8 @@ def test_the_sandbox_check_says_how_to_set_up_when_it_is_not(tmp_path):
     """Run before scripts/verify-setup.sh, it must say what to run, not fail obscurely."""
     proc = subprocess.run(["/bin/sh", str(REPO / "scripts" / "sandbox-check.sh")],
                           capture_output=True, text=True, cwd=REPO,
-                          env={**os.environ, "HOME": str(tmp_path)})
+                          env={**os.environ, "HOME": str(tmp_path),
+                               "XDG_CONFIG_HOME": str(tmp_path / ".config")})
 
     assert proc.returncode != 0
     assert "scripts/verify-setup.sh" in proc.stderr

@@ -20,7 +20,9 @@ import shutil
 import subprocess
 import threading
 import time
+import traceback
 import uuid
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,7 +47,7 @@ NOT_A_GIT_REPO = "no worktree (not a git repo)"
 
 
 # Task worktree creation, controller commits and verify checkout maintenance
-# mutate shared git metadata. Never hold these locks while an engine/check runs.
+# mutate shared git metadata. Never hold these locks while an engine/verify check runs.
 _repository_locks: dict[Path, threading.RLock] = {}
 _repository_locks_guard = threading.Lock()
 
@@ -90,13 +92,13 @@ def _worktree_file_lock(repo: str | Path | None):
             fcntl.flock(handle, fcntl.LOCK_UN)
 
 
-def _run_git(args, cwd: str, timeout: int = _GIT_TIMEOUT):
+def _run_git(args, cwd: str, timeout: int = _GIT_TIMEOUT, *, env=None):
     """Run git capturing output; never raises on non-zero exit.
 
     Hardened against malicious .git/config (GHSA-7x36-8jrh-v4pw): this runs unattended
     against a worktree the worker controls, so .gitconfig must not execute.
     """
-    env = noninteractive_repo_git_env(cwd)
+    env = noninteractive_repo_git_env(cwd) if env is None else env
     if env is None:
         raise OSError("refused git operation: could not harden repository filter configuration")
     return subprocess.run(["git", *harden_git_argv(args)], cwd=cwd, capture_output=True,
@@ -125,6 +127,48 @@ class TaskWorktree:
     branch: str
     repo_root: Path
     base_commit: str
+
+
+_GIT_METADATA_CHANGED = "not committed: the task worktree's git metadata changed (refused)"
+
+
+class _WorktreeGitMetadataError(OSError):
+    """The controller-owned registration of a task worktree is unavailable."""
+
+
+def _task_git_env(worktree: TaskWorktree, base=None) -> dict[str, str]:
+    """Pin git, including filter discovery, without reading the worker's .git file."""
+    try:
+        pointer = worktree.path / ".git"
+        if pointer.is_symlink() or not pointer.is_file():
+            raise _WorktreeGitMetadataError(_GIT_METADATA_CHANGED)
+        root = worktree.repo_root.resolve()
+        common = _run_git(["rev-parse", "--git-common-dir"], cwd=str(root))
+        if common.returncode or not common.stdout.strip():
+            raise _WorktreeGitMetadataError(_GIT_METADATA_CHANGED)
+        registrations = (root / common.stdout.strip()).resolve() / "worktrees"
+        target = worktree.path.resolve()
+        git_dir = None
+        for entry in registrations.iterdir():
+            try:
+                backlink = (entry / "gitdir").read_text(encoding="utf-8").strip()
+            except FileNotFoundError:
+                continue
+            backlink_path = entry / backlink
+            if (backlink and backlink_path.name == ".git"
+                    and backlink_path.parent.resolve() == target):
+                git_dir = entry.resolve()
+                break
+        if git_dir is None:
+            raise _WorktreeGitMetadataError(_GIT_METADATA_CHANGED)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        raise _WorktreeGitMetadataError(_GIT_METADATA_CHANGED) from exc
+    pinned = dict(os.environ if base is None else base)
+    pinned.update(GIT_DIR=str(git_dir), GIT_WORK_TREE=str(worktree.path.resolve()))
+    env = noninteractive_repo_git_env(str(worktree.path), pinned)
+    if env is None:
+        raise OSError("refused git operation: could not harden repository filter configuration")
+    return env
 
 
 class VerifyCheckoutError(RuntimeError):
@@ -223,8 +267,9 @@ def red_checkout(worktree: TaskWorktree, base_commit: str, commit: str, paths):
 def uncommitted_worktree_paths(worktree: TaskWorktree, limit: int = 5) -> list[str]:
     """Ignored or untracked task files absent from a committed verify checkout."""
     try:
+        env = _task_git_env(worktree)
         status = _run_git(["status", "--porcelain=v1", "-z", "--ignored",
-                           "--untracked-files=all"], cwd=str(worktree.path))
+                           "--untracked-files=all"], cwd=str(worktree.path), env=env)
         if status.returncode != 0:
             return []
         return [record[3:] for record in status.stdout.split("\0")
@@ -313,8 +358,10 @@ def capture_worktree_diff(worktree: TaskWorktree) -> tuple[str, str | None]:
     ``""`` for both "the worker changed nothing" and "git would not tell us" is
     what turns a measurement failure into an affirmative claim downstream."""
     try:
-        staged = _run_git(["add", "-AN", "--", *_WORK_PATHSPEC], cwd=str(worktree.path))
-        proc = _run_git(["diff", "--no-color", "--", *_WORK_PATHSPEC], cwd=str(worktree.path))
+        env = _task_git_env(worktree)
+        staged = _run_git(["add", "-AN", "--", *_WORK_PATHSPEC], cwd=str(worktree.path), env=env)
+        proc = _run_git(["diff", "--no-color", "--", *_WORK_PATHSPEC],
+                        cwd=str(worktree.path), env=env)
     except (OSError, subprocess.SubprocessError) as exc:
         logger.warning("hermes-control: diff failed for %s", worktree.path, exc_info=True)
         return "", _capture_failed(worktree, str(exc) or type(exc).__name__)
@@ -349,6 +396,17 @@ def changed_codex_paths(worktree: TaskWorktree) -> tuple[list[str], str | None]:
     return _changed_settings_paths(worktree, ".codex")
 
 
+def changed_gemini_paths(worktree: TaskWorktree) -> tuple[list[str], str | None]:
+    """agy loads both directories at session start, including on continuation."""
+    changed = set()
+    for directory in (".agents", ".gemini"):
+        paths, failure = _changed_settings_paths(worktree, directory)
+        if failure:
+            return [], failure
+        changed.update(paths)
+    return sorted(changed), None
+
+
 def _changed_settings_paths(worktree: TaskWorktree, directory: str
                              ) -> tuple[list[str], str | None]:
     try:
@@ -367,11 +425,12 @@ def _changed_settings_paths(worktree: TaskWorktree, directory: str
                     path = Path(root) / name
                     if path.is_symlink():
                         paths.add(f"{path.relative_to(worktree.path)} is a symlink")
+        env = _task_git_env(worktree)
         status = _run_git(["status", "--porcelain=v1", "-z", "--untracked-files=all",
                            "--ignored=matching",
-                           "--", f":(icase){directory}"], cwd=str(worktree.path))
+                           "--", f":(icase){directory}"], cwd=str(worktree.path), env=env)
         base = _run_git(["diff", "--name-only", "-z", worktree.base_commit,
-                         "--", f":(icase){directory}"], cwd=str(worktree.path))
+                         "--", f":(icase){directory}"], cwd=str(worktree.path), env=env)
     except (OSError, subprocess.SubprocessError) as exc:
         return [], str(exc)
     for proc in (status, base):
@@ -386,11 +445,13 @@ def base_settings_paths(worktree: TaskWorktree, engine: str, *, restricted: bool
                          ) -> tuple[list[str], str | None]:
     """Inspect base settings; restricted Claude still refuses settings symlinks."""
     directory = f".{engine}"
+    directories = {".agents", ".gemini"} if engine == "gemini" else {directory}
     try:
         # Preserve modes: a settings directory itself may be a symlink to a
         # tracked configuration directory, which ls-tree does not recurse into.
+        env = _task_git_env(worktree)
         proc = _run_git(["ls-tree", "-r", "-z", "--full-tree", worktree.base_commit],
-                        cwd=str(worktree.path))
+                        cwd=str(worktree.path), env=env)
     except (OSError, subprocess.SubprocessError) as exc:
         return [], str(exc)
     if proc.returncode:
@@ -404,6 +465,10 @@ def base_settings_paths(worktree: TaskWorktree, engine: str, *, restricted: bool
         if not separator or len(fields) != 3:
             return [], "could not parse base tree entry"
         components = [component.casefold() for component in path.split("/")]
+        if engine == "gemini":
+            if components[0] in directories and (len(components) > 1 or fields[0] == "120000"):
+                paths.append(path)
+            continue
         if fields[0] == "120000" and components[0] in {".codex", ".claude"}:
             paths.append(path)
             continue
@@ -419,8 +484,9 @@ def base_settings_paths(worktree: TaskWorktree, engine: str, *, restricted: bool
 def committed_claude_paths(worktree: TaskWorktree, commit: str) -> list[str]:
     """Paths under .claude in the task's committed diff from its base."""
     try:
+        env = _task_git_env(worktree)
         proc = _run_git(["diff", "--name-only", "-z", worktree.base_commit, commit,
-                         "--", ":(icase).claude"], cwd=str(worktree.path))
+                         "--", ":(icase).claude"], cwd=str(worktree.path), env=env)
     except (OSError, subprocess.SubprocessError):
         return [".claude/ (could not inspect committed diff)"]
     if proc.returncode != 0:
@@ -428,25 +494,55 @@ def committed_claude_paths(worktree: TaskWorktree, commit: str) -> list[str]:
     return [path for path in proc.stdout.split("\0") if path]
 
 
-def commit_worktree(worktree: TaskWorktree, *, message: str) -> tuple[str | None, str | None]:
+def commit_worktree(worktree: TaskWorktree, *, message: str,
+                    before_commit: Callable[[TaskWorktree, dict[str, str]], str | None] | None = None,
+                    ) -> tuple[str | None, str | None]:
     """Commit everything the worker changed onto the task branch.
 
     Returns ``(sha, None)`` on success, ``(None, None)`` when there is nothing to
-    commit, and ``(None, reason)`` when git fails. Workers are told never to commit,
-    so without this step merging a task branch brings back nothing at all.
+    commit, and ``(None, reason)`` when git or the guard refuses. The optional guard
+    inspects the staged index under the repository lock, with no later staging.
+    Workers are told never to commit, so without this step merging a task branch
+    brings back nothing at all.
     """
     with _repository_lock(worktree.repo_root):
         cwd = str(worktree.path)
         try:
-            added = _run_git(["add", "-A", "--", *_WORK_PATHSPEC], cwd=cwd)
+            env = _task_git_env(worktree)
+            expected_ref = f"refs/heads/{worktree.branch}"
+            head_ref = _run_git(["symbolic-ref", "HEAD"], cwd=cwd, env=env)
+            if head_ref.returncode or head_ref.stdout.strip() != expected_ref:
+                return None, _GIT_METADATA_CHANGED
+            added = _run_git(["add", "-A", "--", *_WORK_PATHSPEC], cwd=cwd, env=env)
             if added.returncode != 0:
                 return None, f"git add failed: {added.stderr.strip()[:300]}"
-            if _run_git(["diff", "--cached", "--quiet"], cwd=cwd).returncode == 0:
+            if _run_git(["diff", "--cached", "--quiet"], cwd=cwd, env=env).returncode == 0:
                 return None, None
-            committed = _run_git([*_COMMIT_CONFIG, "commit", "-q", "-m", message], cwd=cwd)
+            if before_commit:
+                try:
+                    reason = before_commit(worktree, env)
+                except Exception as exc:  # noqa: BLE001 - never expose secret bytes
+                    frame, line = list(traceback.walk_tb(exc.__traceback__))[-1]
+                    logger.warning("hermes-control: secret scan failed (%s) at %s:%s",
+                                   type(exc).__name__, frame.f_globals.get("__name__", "unknown"), line)
+                    reason = f"not committed: the secret scan could not run ({type(exc).__name__})"
+                if reason:
+                    reset = _run_git(["reset", "-q"], cwd=cwd, env=env)
+                    if reset.returncode != 0:
+                        logger.warning(
+                            "hermes-control: git reset after blocked commit failed in %s (exit %s)",
+                            worktree.path, reset.returncode)
+                    return None, reason
+            head_ref = _run_git(["symbolic-ref", "HEAD"], cwd=cwd, env=env)
+            if head_ref.returncode or head_ref.stdout.strip() != expected_ref:
+                return None, _GIT_METADATA_CHANGED
+            committed = _run_git([*_COMMIT_CONFIG, "commit", "-q", "-m", message],
+                                 cwd=cwd, env=env)
             if committed.returncode != 0:
                 return None, f"git commit failed: {committed.stderr.strip()[:300]}"
-            head = _run_git(["rev-parse", "HEAD"], cwd=cwd)
+            head = _run_git(["rev-parse", "HEAD"], cwd=cwd, env=env)
+        except _WorktreeGitMetadataError:
+            return None, _GIT_METADATA_CHANGED
         except (OSError, subprocess.SubprocessError) as exc:
             logger.warning("hermes-control: commit failed in %s", worktree.path, exc_info=True)
             return None, f"commit failed: {exc}"

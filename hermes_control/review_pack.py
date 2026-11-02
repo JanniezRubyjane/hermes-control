@@ -29,16 +29,14 @@ def _git(repo: Path, *args: str) -> str:
     return result.stdout
 
 
-def _git_evidence(repo_name: str | None, task: dict[str, Any], *, include_diff: bool
-                  ) -> dict[str, Any]:
+def _resolve_git_evidence(repo_name: str | None, task: dict[str, Any]) -> dict[str, Any]:
+    """Resolve the recorded task refs and shared review base without reading a diff."""
     evidence: dict[str, Any] = {"branch": task["branch"],
                                 "commit": (task["commit"] or {}).get("sha"),
                                 "worktree": task["worktree"], "base": None,
                                 "base_sha": None, "base_source": None,
                                 "head_is_ancestor": None, "diff_stat": None,
                                 "added_lines": None, "removed_lines": None}
-    if include_diff:
-        evidence["diff"] = None
     if not repo_name or not Path(repo_name).is_dir():
         evidence["git_error"] = f"repo gone: {repo_name or '(not recorded)'}"
         return evidence
@@ -62,6 +60,22 @@ def _git_evidence(repo_name: str | None, task: dict[str, Any], *, include_diff: 
         base = recorded_base or _git(repo, "merge-base", branch_ref, "HEAD").strip()
         evidence["base"] = base[:7]
         evidence["base_sha"] = base
+    except (ValueError, RuntimeError) as exc:
+        evidence["git_error"] = str(exc)
+    return evidence
+
+
+def _git_evidence(repo_name: str | None, task: dict[str, Any], *, include_diff: bool
+                  ) -> dict[str, Any]:
+    evidence = _resolve_git_evidence(repo_name, task)
+    if include_diff:
+        evidence["diff"] = None
+    if "git_error" in evidence:
+        return evidence
+    repo = Path(repo_name)
+    branch_ref = f"refs/heads/{task['branch']}"
+    base = evidence["base_sha"]
+    try:
         try:
             ancestor = _run_git(["merge-base", "--is-ancestor", "HEAD", branch_ref], cwd=str(repo))
         except (OSError, subprocess.SubprocessError) as exc:
@@ -78,7 +92,9 @@ def _git_evidence(repo_name: str | None, task: dict[str, Any], *, include_diff: 
         evidence["removed_lines"] = sum(int(fields[1]) for line in numstat.splitlines()
                                          if (fields := line.split("\t", 2))[1].isdigit())
         if include_diff:
-            evidence["diff"] = _git(repo, "diff", "--no-ext-diff", "--no-textconv", span)
+            from .review_diff import _mask
+
+            evidence["diff"], _ = _mask(_git(repo, "diff", "--no-ext-diff", "--no-textconv", span))
     except (ValueError, RuntimeError) as exc:
         evidence["git_error"] = str(exc)
     return evidence
@@ -116,6 +132,15 @@ def _raw_evidence(events: list[ControlEvent]) -> tuple[dict[str, str], dict[str,
     return final_text, errors, omitted
 
 
+def _command_input(payload: dict) -> str | None:
+    """Read a command, falling back to agy's CommandLine only if absent."""
+    tool_input = payload.get("input")
+    if not isinstance(tool_input, dict):
+        return None
+    command = tool_input.get("command", tool_input.get("CommandLine"))
+    return command if isinstance(command, str) else None
+
+
 def _unbacked_claims(report: dict | None, events: list[ControlEvent], task_id: str
                      ) -> list[str]:
     if report is None:
@@ -125,9 +150,9 @@ def _unbacked_claims(report: dict | None, events: list[ControlEvent], task_id: s
         if event.task_id != task_id or event.kind != "tool_start":
             continue
         payload = event.payload if isinstance(event.payload, dict) else {}
-        tool_input = payload.get("input")
-        if isinstance(tool_input, dict) and isinstance(tool_input.get("command"), str):
-            commands.append(tool_input["command"])
+        command = _command_input(payload)
+        if command is not None:
+            commands.append(command)
     def tokens(value: str) -> list[str]:
         normalized = " ".join(value.split())
         try:
@@ -137,6 +162,17 @@ def _unbacked_claims(report: dict | None, events: list[ControlEvent], task_id: s
 
     def matches(claim: str, command: str) -> bool:
         wanted = tokens(claim)
+        prefix = None
+        # Internal ellipses are literal; trailing ellipses abbreviate a token.
+        for index, token in enumerate(wanted):
+            ellipsis = re.search(r"…|\.\.\.", token)
+            if ellipsis is None:
+                continue
+            before, after = token[:ellipsis.start()], token[ellipsis.end():]
+            if not before or not after:
+                wanted = wanted[:index]
+                prefix = before or None
+                break
         if not wanted:
             return False
         wanted[-1] = re.sub(r"(?:;|&&|\|\|)+$", "", wanted[-1])
@@ -150,9 +186,11 @@ def _unbacked_claims(report: dict | None, events: list[ControlEvent], task_id: s
         streams.extend(tokens(command_tokens[index + 1])
                        for index, token in enumerate(command_tokens[:-1])
                        if token in {"-c", "-lc"})
+        size = len(wanted) + (prefix is not None)
         return any(stream[index:index + len(wanted)] == wanted
+                   and (prefix is None or stream[index + len(wanted)].startswith(prefix))
                    for stream in streams
-                   for index in range(len(stream) - len(wanted) + 1))
+                   for index in range(len(stream) - size + 1))
 
     return [claim["command"] for claim in report["ran"]
             if not any(matches(claim["command"], command) for command in commands)]
@@ -201,8 +239,9 @@ def build(run_id: str, *, include_diff: bool = False) -> dict[str, Any] | None:
                 "actual_engine": last["engine"] if last else None,
                 "actual_model": last["model"] if last else None,
                 "actual_effort": last["effort"] if last else None,
-                "moved": bool(reroute or any(attempt["engine"] != task["planned_engine"]
-                                              for attempt in task["attempts"])),
+                "moved": bool((reroute and not reroute.get("stayed"))
+                              or any(attempt["engine"] != task["planned_engine"]
+                                     for attempt in task["attempts"])),
                 "rerouted_reason": reroute.get("reason"),
                 "rerouted": task["rerouted"], "limits": task["limits"],
                 **_git_evidence(view["repo"], task, include_diff=include_diff),

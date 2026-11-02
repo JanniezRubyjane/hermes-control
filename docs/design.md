@@ -516,7 +516,10 @@ default terminal backend is `local`).
   `hermes_subprocess_env(inherit_credentials=False)` — no provider keys, since
   the check needs none. A probe (`printf` assembling a marker) first proves the
   sandbox really executes commands, so an old codex's usage error is not read as
-  a failing check. **No sandbox, no run:** without codex the command is never
+  a failing check. Before running the post-commit check, a containment probe also
+  proves a write outside the checkout is blocked, refusing to judge when `HOME`
+  is not writable or lies in a temp directory the sandbox may write.
+  **No sandbox, no run:** without codex the command is never
   executed bare, and the task stays unproven. `-P :danger-full-access`, a real
   built-in that lets the command write anywhere, is in the forbidden-flag guard.
 - A `claude` worker's pre-approved script runs only that one sandboxed

@@ -52,7 +52,7 @@ def test_a_cap_can_be_set_per_engine():
 
 
 @pytest.mark.parametrize("raw, message", [
-    ({"gemini": {"max_percent": 50}}, "unknown engine"),
+    ({"unknown": {"max_percent": 50}}, "unknown engine"),
     ({"claude": {"max_percent": 0}}, "1 and 100"),
     ({"claude": {"max_percent": 101}}, "1 and 100"),
     ({"claude": {"max_percent": "lots"}}, "1 and 100"),

@@ -19,7 +19,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Callable
 
 from .engines.base import engine_env
-from .engines.registry import get_adapter
+from .engines.registry import ENGINE_NAMES, get_adapter
 
 CACHE_SECONDS = 600
 _TIMEOUT_SECONDS = 30
@@ -93,7 +93,31 @@ def _claude() -> dict[str, Any]:
     return {"source": source, "models": models}
 
 
-_FETCHERS: dict[str, Callable[[], dict[str, Any]]] = {"claude": _claude, "codex": _codex}
+def parse_gemini_catalog(text: str) -> list[CatalogModel]:
+    from .engines.gemini import model_lines
+
+    return [CatalogModel(name=model_id, label=label) for model_id, label in model_lines(text)]
+
+
+def _gemini() -> dict[str, Any]:
+    from .engines.gemini import agy_command
+
+    adapter = get_adapter("gemini")
+    info = adapter.probe()
+    if info is None:
+        raise RuntimeError("agy is not installed; run `agy` after installing it")
+    proc = agy_command(info.path, ["models"], env=adapter.engine_env())
+    models = parse_gemini_catalog(proc.stdout)
+    if proc.returncode != 0 or not models:
+        raise RuntimeError("agy models returned no catalog; run `agy` to sign in with Google")
+    return {"source": "agy models (the catalog agy uses for your account)", "models": models}
+
+
+_FETCHERS: dict[str, Callable[[], dict[str, Any]]] = {"claude": _claude}
+if "codex" in ENGINE_NAMES:
+    _FETCHERS["codex"] = _codex
+if "gemini" in ENGINE_NAMES:
+    _FETCHERS["gemini"] = _gemini
 # engine -> (monotonic time, entry). Successes only: a transient failure should not
 # stick for the whole cache period.
 _cache: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -105,6 +129,8 @@ def available(*, refresh: bool = False, now: Callable[[], float] = time.monotoni
     hides the other's list."""
     result: dict[str, Any] = {}
     for engine, fetch in _FETCHERS.items():
+        if engine not in ENGINE_NAMES:
+            continue
         with _lock:
             cached = _cache.get(engine)
         if cached and not refresh and now() - cached[0] < CACHE_SECONDS:

@@ -52,7 +52,7 @@ def test_without_a_default_the_first_allowed_model_is_the_default():
 
 
 @pytest.mark.parametrize("settings, message", [
-    ({"gemini": {}}, "unknown engine"),
+    ({"unknown": {}}, "unknown engine"),
     ({"claude": {"default": "haiku", "allowed": {"sonnet": ""}}}, "not in the allowed"),
     ({"claude": {"allowed": {"sonnet": {"effort": "ludicrous"}}}}, "effort"),
     ({"codex": {"allowed": {"--dangerously-bypass-approvals-and-sandbox": ""}}}, "model name"),

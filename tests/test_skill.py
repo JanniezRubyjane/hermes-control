@@ -18,11 +18,21 @@ def test_skill_file_exists():
 def test_skill_reload_stays_small_and_references_exist():
     body = SKILL.read_text(encoding="utf-8")
     assert len(body) <= 6000
-    assert _frontmatter()["version"] == "0.1.0"
-    for name in ("verify", "review", "limits", "dependencies"):
+    assert _frontmatter()["version"] == "0.2.0"
+    for name in ("verify", "review", "limits", "dependencies", "diagrams"):
         path = f"references/{name}.md"
         assert f"file_path='{path}'" in body
         assert (SKILL.parent / path).is_file()
+
+
+def test_skill_routes_repo_diagrams_and_reports_the_link():
+    body = _prose()
+    assert 'hermes control diagram --repo <path> --ask "<their request>"' in body
+    assert "background with completion notify" in body
+    assert "report title, summary, review counts and the link" in body
+    assert "never paste the spec" in body
+    assert "file_path='references/diagrams.md'" in body
+    assert (SKILL.parent / "references/diagrams.md").is_file()
 
 
 def test_frontmatter_has_the_required_fields():
@@ -43,7 +53,7 @@ def test_skill_documents_the_engine_security_difference():
 
 def test_skill_documents_the_pin_override_and_the_why_requirement():
     body = SKILL.read_text(encoding="utf-8")
-    assert "@claude" in body and "@codex" in body
+    assert "@<engine>" in body and "any enabled engine" in body
     assert "why" in body.lower()
 
 
@@ -118,6 +128,13 @@ def _prose():
     return " ".join(SKILL.read_text(encoding="utf-8").lower().split())
 
 
+def test_skill_explains_gemini_permission_refusals():
+    assert ("a denied agy action (a shell command when agy's `toolpermission` is not "
+            "`proceed-in-sandbox`, a path outside the repo, or network) ends the task "
+            "with `failure_mode: guard`; change the goal, the agy setting or the engine, "
+            "never retry unchanged.") in _prose()
+
+
 def test_the_users_model_settings_choose_the_engine_too():
     """Seen in the evaluation: a check listed for codex's light model went to claude,
     because the engine notes decided the engine before any listed use was read."""
@@ -167,7 +184,7 @@ def test_skill_tells_the_planner_to_check_back_on_a_running_dispatch():
 
 def test_skill_routes_codex_writes_to_claude_review():
     body = _prose()
-    assert "codex writes, claude reviews" in body
+    assert "the listed writer writes, claude reviews" in body
     assert "never the model that wrote the diff" in body
     assert "at most two review rounds" in body
 
@@ -246,3 +263,33 @@ def test_skill_tells_the_planner_to_report_in_the_users_language():
     body = _prose()
     assert "language the user writes in" in body
     assert "even when the workers' results are in english" in body
+
+
+def test_skill_preserves_cross_module_reading_and_branch_handoff_rules():
+    body = _prose()
+    assert "the writer can read across modules" in body
+    assert "name each branch and explain `git merge <branch>`" in body
+
+
+def test_diagram_reference_and_docs_use_one_kind_per_flag_and_state_defaults():
+    for path in (SKILL.parent / "references/diagrams.md",
+                 SKILL.parents[2] / "docs/diagrams-view.md",
+                 SKILL.parents[2] / "docs/usage.md"):
+        body = " ".join(path.read_text(encoding="utf-8").split())
+        assert "--kind module --kind flow --kind sequence" in body
+        assert "Without `--kind`, module and flow views are drawn" in body
+        assert "--kind module flow sequence" not in body
+        assert "let the request guide the views" not in body
+
+
+def test_skill_and_review_reference_restate_findings_never_verbatim():
+    skill_text = SKILL.read_text(encoding="utf-8").lower()
+    review_text = (SKILL.parent / "references/review.md").read_text(encoding="utf-8").lower()
+    for text in (skill_text, review_text):
+        assert "verbatim" not in text
+        assert "restate" in text
+        assert "in your own words" in text
+        assert "never paste" in text
+    assert "new codex write task" not in review_text
+    assert "new write task for the listed writer" in " ".join(review_text.split())
+

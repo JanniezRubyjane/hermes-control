@@ -2,21 +2,33 @@
 
 from __future__ import annotations
 
+import logging
+
 from .base import EngineAdapter, EngineInfo
 from .claude import ClaudeAdapter
 from .codex import CodexAdapter
+from .gemini import GeminiAdapter
+from .settings import read_engines
 
 _ADAPTERS: dict[str, EngineAdapter] = {
     "claude": ClaudeAdapter(),
     "codex": CodexAdapter(),
+    "gemini": GeminiAdapter(),
 }
 
-ENGINE_NAMES: tuple[str, ...] = tuple(_ADAPTERS)
+try:
+    ENGINE_NAMES: tuple[str, ...] = ("claude", *read_engines())
+except Exception:  # noqa: BLE001 - optional settings must never prevent plugin load
+    logging.getLogger(__name__).warning(
+        "hermes-control: could not read engines setting; gemini stays disabled", exc_info=True)
+    ENGINE_NAMES = ("claude", "codex")
 
 
 def get_adapter(name: str) -> EngineAdapter:
     """Adapter for *name*; KeyError names the bad engine so the planner sees it."""
     try:
+        if name == "gemini" and name not in ENGINE_NAMES:
+            raise KeyError(name)
         return _ADAPTERS[name]
     except KeyError:
         raise KeyError(
@@ -44,7 +56,8 @@ def available_engines() -> dict[str, EngineInfo]:
     """Engines usable right now: installed AND signed in. This is what keeps the
     planner from scheduling work for a CLI that is missing or signed out."""
     found: dict[str, EngineInfo] = {}
-    for name, adapter in _ADAPTERS.items():
+    for name in ENGINE_NAMES:
+        adapter = _ADAPTERS[name]
         info = adapter.probe()
         if info is not None and adapter.auth_problem(info) is None:
             found[name] = info

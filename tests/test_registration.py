@@ -114,7 +114,7 @@ def test_the_real_plugin_loader_loads_this_plugin_and_gets_its_tool(tmp_path, mo
 
     manager = PluginManager(scope_key=str(tmp_path))
     manager._load_plugin(PluginManifest(
-        name="hermes_control", version="0.1.0", description="t",
+        name="hermes_control", version="0.2.0", description="t",
         source="bundled", path=str(PLUGIN_DIR)))
 
     loaded = next(lp for lp in manager._plugins.values()
@@ -137,7 +137,7 @@ def test_control_dispatch_runs_through_the_real_tool_registry(tmp_path, monkeypa
 
     manager = PluginManager(scope_key=str(tmp_path))
     manager._load_plugin(PluginManifest(
-        name="hermes_control", version="0.1.0", description="t",
+        name="hermes_control", version="0.2.0", description="t",
         source="bundled", path=str(PLUGIN_DIR)))
 
     # An unknown engine fails validation inside dispatch(), so no engine CLI runs.
@@ -163,7 +163,7 @@ def test_control_status_runs_through_the_real_tool_registry(tmp_path, monkeypatc
 
     manager = PluginManager(scope_key=str(tmp_path))
     manager._load_plugin(PluginManifest(
-        name="hermes_control", version="0.1.0", description="t",
+        name="hermes_control", version="0.2.0", description="t",
         source="bundled", path=str(PLUGIN_DIR)))
 
     result = registry.dispatch(

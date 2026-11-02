@@ -12,11 +12,20 @@ retains its own license, as described below.
 - `CODE_OF_CONDUCT.md` is Contributor Covenant 2.1 under CC BY 4.0
   ([Creative Commons Attribution 4.0 International](https://creativecommons.org/licenses/by/4.0/)).
   This copy changes only the enforcement contact and Markdown formatting.
+- `hermes_control/dashboard/dist/vendor/mermaid.min.js` is Mermaid 11.16.1
+  (the unmodified `dist/mermaid.min.js` of the npm package, sha256
+  `18327bef70d96fb505fe7287d9f6a7362ebf07ff6576ddfaffb1a06f3e1a2954`), Copyright
+  (c) 2014 - 2022 Knut Sveidqvist, licensed under MIT. The file bundles Mermaid's
+  dependencies, which keep their own licenses: MIT (among them cytoscape, dagre-d3-es,
+  dayjs, KaTeX, khroma, marked, roughjs, stylis, uuid, langium), ISC (d3), BSD-3-Clause
+  (d3-sankey), Apache-2.0 (chevrotain) and MPL-2.0 OR Apache-2.0 (DOMPurify, whose
+  notice the file retains). Their complete license texts ship next to the bundle in
+  `hermes_control/dashboard/dist/vendor/mermaid.THIRD_PARTY_LICENSES.txt`.
 - Dependencies FastAPI, Rich, PyYAML and pytest, plus HTTPX and Starlette used in
   tests, are not vendored. Their installed distributions retain their own
   license notices; pytest is a test runner rather than a runtime requirement.
 
-The complete upstream license texts for Hermes Agent and Lucide follow verbatim.
+The complete upstream license texts for Hermes Agent, Lucide and Mermaid follow verbatim.
 
 ## Hermes Agent
 
@@ -68,6 +77,32 @@ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 The MIT License (MIT) (for portions derived from Feather)
 
 Copyright (c) 2013-2026 Cole Bemis
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+## Mermaid
+
+```text
+The MIT License (MIT)
+
+Copyright (c) 2014 - 2022 Knut Sveidqvist
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

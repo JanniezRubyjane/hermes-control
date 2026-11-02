@@ -11,12 +11,15 @@ settle tasks; a run with unsettled tasks and no event for a while has stopped.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from typing import Any, Callable, Iterator
 
 from .events import ControlEvent
 from .runlog import RunLog, run_log_dir
+
+logger = logging.getLogger(__name__)
 
 # Longer than a task's default timeout (30 min): quiet this long means nobody is writing.
 STALE_SECONDS = 35 * 60
@@ -159,12 +162,12 @@ def _apply(task: dict[str, Any], kind: str, engine: str, ts: float,
         attempt["result"] = {"ok": bool(payload.get("ok", True)),
                              "input_tokens": usage.get("input_tokens"),
                              "cached_input_tokens": usage.get("cached_input_tokens") if "cached_input_tokens" in usage
-                             else usage.get("cache_read_input_tokens"),
+                             else usage.get("cache_read_input_tokens", usage.get("cache_read_tokens")),
                              "cache_write_tokens": usage.get("cache_write_input_tokens") if "cache_write_input_tokens" in usage
                              else usage.get("cache_creation_input_tokens"),
                              "output_tokens": usage.get("output_tokens"),
                              "reasoning_tokens": usage.get("reasoning_output_tokens") if "reasoning_output_tokens" in usage
-                             else details.get("thinking_tokens"),
+                             else details.get("thinking_tokens", usage.get("thinking_tokens")),
                              "cost_usd": payload.get("total_cost_usd")}
     elif kind == "error":
         attempt["error"] = _error_text(payload)
@@ -187,7 +190,9 @@ def _status(task: dict[str, Any], *, settled: bool, stale: bool) -> tuple[str, s
     verify = task["verify"]
     last = task["attempts"][-1] if task["attempts"] else None
     if task["commit"]:
-        if verify and verify.get("passed"):
+        if (verify and verify.get("passed") and not verify.get("unproven_reason")
+                and (summary is None or summary.get("verdict") != "unproven")
+                and not (summary or {}).get("unproven_reason")):
             return "done", None
         if verify or summary:
             return "unproven", ((verify or {}).get("unproven_reason")
@@ -222,6 +227,8 @@ def run_view(run_id: str, *, now: Callable[[], float] = time.time) -> dict[str, 
         if event.kind == "plan":
             planner, repo = payload.get("planner"), payload.get("repo")
             for planned in payload.get("tasks") or []:
+                if not isinstance(planned, dict) or not planned.get("id"):
+                    continue
                 tasks.setdefault(planned["id"], _new_task(planned["id"], planned))
             continue
         if event.kind == "summary":
@@ -259,7 +266,10 @@ def run_view(run_id: str, *, now: Callable[[], float] = time.time) -> dict[str, 
     return {"run_id": run_id, "started_at": events[0].ts, "updated_at": updated,
             "state": ("paused" if any(task["paused"] for task in tasks.values()) else "finished")
             if settled else ("stopped" if stale else "running"),
-            "repo": repo, "planner": planner, "tasks": views}
+            "repo": repo, "planner": planner, "tasks": views,
+            "summarized": any(event.kind == "summary" for event in events)}
+
+
 class _TraceBuilder:
     """Replay log events into task timelines, retaining pending calls for later ends."""
 
@@ -347,7 +357,7 @@ class _TraceBuilder:
             self.end_seq[id(entry)] = event.seq
             return [(task_id, entry)]
         elif kind in ("limit", "rerouted", "paused", "resumed", "commit", "verify", "proof",
-                      "error", "result", "slot_wait", "wake"):
+                      "error", "result", "slot_wait", "wake", "interrupted"):
             entry = {**base, "type": kind, "data": payload}
         else:
             return []
@@ -436,8 +446,24 @@ def list_runs(limit: int = 30, *, now: Callable[[], float] = time.time) -> list[
     files = sorted(run_log_dir().glob("run-*.jsonl"), key=lambda p: p.stat().st_mtime,
                    reverse=True)[:limit]
     listed = []
+    views = {}
     for path in files:
-        view = run_view(path.stem[len("run-"):], now=now)
+        run_id = path.stem[len("run-"):]
+        views[run_id] = run_view(run_id, now=now)
+    # A run whose log has no summary has not ended, whatever its state says: a run quiet
+    # for STALE_SECONDS looks finished or paused to run_view when its last attempt ended.
+    open_ids = [run_id for run_id, view in views.items()
+                if view is not None and not view["summarized"]]
+    try:
+        # recover imports dispatch, which imports this module.
+        from . import recover
+
+        for run_id in open_ids:
+            if recover.reconcile(run_id):  # never raises
+                views[run_id] = run_view(run_id, now=now)
+    except Exception:  # noqa: BLE001 - the list must load even if recovery cannot
+        logger.warning("hermes-control: could not reconcile interrupted runs", exc_info=True)
+    for view in views.values():
         if view is None:
             continue
         listed.append({

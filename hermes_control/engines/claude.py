@@ -55,6 +55,17 @@ _WORKER_CONTRACT = (
 )
 
 
+_READONLY_WORKER_CONTRACT = _WORKER_CONTRACT.split("\n\n", 1)[0] + "\n\n" + (
+    "This task is read-only (plan mode): you cannot edit files. Read-only shell "
+    "commands such as git diff, git show, git log and git status can run; try "
+    "the one you need before reporting that you cannot. Commands that change "
+    "files or need the network are refused; do not retry a refused command "
+    "in another spelling, with sudo, through env, sh -c, a pipe, or by writing "
+    "a scratch file. In your final message, say which checks you could not "
+    "run and why."
+)
+
+
 _RESTRICTED_SUPPORT: dict[str, bool] = {}
 
 
@@ -96,6 +107,7 @@ def _auth_status_summary(output: str) -> str:
 
 class ClaudeAdapter(EngineAdapter):
     name = "claude"
+    planner_note = "is prompt-gated and reviews diffs read-only (see the model field for which model)"
     sign_in_command = "claude auth login"
     resumes_sessions = True
     # `claude --help`: --effort <level> (low, medium, high, xhigh, max).
@@ -147,7 +159,7 @@ class ClaudeAdapter(EngineAdapter):
             "--verbose",
             "--add-dir", str(cwd),
             "--append-system-prompt", (_WORKER_CONTRACT + "\n\n" + REPORT_REQUEST
-                                       if task.policy.write else _WORKER_CONTRACT),
+                                       if task.policy.write else _READONLY_WORKER_CONTRACT),
             # Restricted mode ignores repo settings/hooks while loading CLAUDE.md.
             # Keep project scoping for old CLIs; the base-settings guard gates those.
             # Strict MCP and --tools exclude operator extensions.

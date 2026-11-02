@@ -10,7 +10,7 @@ import time
 
 import pytest
 
-from hermes_control.dispatch import dispatch, run_task
+from hermes_control.dispatch import WORK_STYLE, dispatch, run_task
 from hermes_control import dispatch as dispatch_module
 from hermes_control import limits
 from hermes_control.engines.base import ControlTask, EngineAdapter, EngineInfo
@@ -1246,7 +1246,7 @@ def test_the_worker_is_told_how_its_work_will_be_checked(repo, tmp_path):
     task = dataclasses.replace(_task(), engine="codex",
                                verify="python3 -m pytest -q tests/test_calc.py")
     run_task(task, run_id="r1", log=log, worktree=worktree, adapter=GoalCapturingAdapter())
-    assert seen[0].startswith("g")
+    assert seen[0].startswith(WORK_STYLE + "\n\nTask: g")
     assert "python3 -m pytest -q tests/test_calc.py" in seen[0]
     assert seen[0].count("How to work efficiently here:") == 1
     assert seen[0].index("Make that command pass.") < seen[0].index(

@@ -30,7 +30,7 @@ try:
 except ImportError:  # Windows has no flock, as with engine slots.
     fcntl = None
 
-from . import limits, model_policy, parallel, pauses, proof, runs, stall
+from . import limits, model_policy, parallel, pauses, proctree, proof, routing, runs, stall
 from .engines.base import ControlTask, engine_env
 from .engines.registry import ENGINE_NAMES, get_adapter
 from .events import EMPTY_DIFF_REASON, ControlResult, RawEvent
@@ -39,6 +39,7 @@ from .overlap import find_overlaps
 from .policy import ExecPolicy
 from .proctree import (
     group_popen_kwargs,
+    process_start_time,
     stop_group,
     wait_bounded,
 )
@@ -50,6 +51,7 @@ from .worktree import (
     capture_worktree_diff,
     changed_claude_paths,
     changed_codex_paths,
+    changed_gemini_paths,
     create_task_worktree_with_reason,
 )
 
@@ -150,7 +152,7 @@ def parse_tasks(raw_tasks: Sequence[dict[str, Any]], *,
         if goal.startswith("-"):
             raise ValueError(f"task {task_id!r}: goal must start with a word, not '-'")
         engine = str(raw.get("engine") or "").strip()
-        if engine not in ENGINE_NAMES:
+        if engine not in ENGINE_NAMES and engine != "codex":
             raise ValueError(
                 f"task {task_id!r}: unknown engine {engine!r}; "
                 f"choose one of {', '.join(ENGINE_NAMES)}")
@@ -241,10 +243,41 @@ def with_verify_note(task: ControlTask) -> ControlTask:
              f"with no network:\n{task.verify}\nMake that command pass.")
 
 
-def with_check_guidance(task: ControlTask) -> ControlTask:
-    """Guide Codex write workers toward focused checks before their final check."""
-    if task.engine != "codex" or not task.verify or not task.policy.write:
+def with_check_guidance(task: ControlTask, *, adapter=None) -> ControlTask:
+    """Guide Codex and Gemini write workers toward focused checks before their final check."""
+    if task.engine not in ("codex", "gemini") or not task.verify or not task.policy.write:
         return task
+    if task.engine == "gemini":
+        try:
+            adapter = adapter if adapter is not None else get_adapter(task.engine)
+            check_commands = getattr(adapter, "headless_commands_allowed", None)
+            commands_allowed = (check_commands() is True) if check_commands is not None else False
+        except Exception:
+            commands_allowed = False
+
+        if commands_allowed:
+            guidance = (
+                "How to work efficiently here: you may run the check command above yourself "
+                "inside your sandbox at any time. While you work, run only the tests that "
+                "cover the files you change, and run the full check command once when you "
+                "think you are done; if it fails, fix and run it again. "
+                "If the check command cannot run here (it says it is not set up, cannot "
+                "find its interpreter or test runner, or is refused), do not run it or "
+                "a variant of it again: agy can deny a repeated command and a denied "
+                "action ends the task. Instead, finish the change, and say in your "
+                "report that the check could not run. Hermes-Control runs the check "
+                "after you finish. You must not run git: "
+                "Hermes-Control commits and diffs for you. "
+                "Read files in the line ranges you need rather than printing whole files, "
+                "and read a whole file when you need its full context.")
+        else:
+            guidance = (
+                "How to work efficiently here: do not run any shell command, including tests "
+                "and git: agy's settings deny commands in headless mode and a denied action "
+                "ends the task. Hermes-Control runs the check after you finish.")
+        return dataclasses.replace(
+            task, goal=f"{task.goal}\n\n{guidance} Never skip, weaken or delete a test "
+                       "to make the check pass.")
     return dataclasses.replace(
         task,
         goal=f"{task.goal}\n\nHow to work efficiently here: you may run the check "
@@ -257,13 +290,41 @@ def with_check_guidance(task: ControlTask) -> ControlTask:
              "weaken or delete a test to make the check pass.")
 
 
+WORK_STYLE = (
+    "Working style (turns cost more than bytes): batch independent read-only probes "
+    "into ONE shell call, separated with echo '--- name' markers, and cap each "
+    "output with head or rg -m. Never print a whole large file; read only the slice "
+    "you need (rg -n with context, or sed -n 'A,Bp'). Stop as soon as every item "
+    "asked for has evidence; do not re-verify what you already saw. This never "
+    "shortens the tests, checks or report the task asks for. In your final message, "
+    "mark each claim as seen (cite file:line) or inferred; a fact you did not find "
+    "is unknown."
+)
+
+
 def with_report_request(task: ControlTask) -> ControlTask:
-    """Ask Codex write workers for a closing claim without changing proof."""
+    """Ask Codex and Gemini write workers for a closing claim without changing proof."""
     from .worker_report import REPORT_REQUEST
 
-    if task.engine != "codex" or not task.policy.write or REPORT_REQUEST in task.goal:
+    if task.engine not in ("codex", "gemini") or not task.policy.write or REPORT_REQUEST in task.goal:
         return task
     return dataclasses.replace(task, goal=f"{task.goal}\n\n{REPORT_REQUEST}")
+
+
+def with_work_style(task: ControlTask, *, adapter=None) -> ControlTask:
+    """Prepend the batched-probe working style for Codex and command-enabled Gemini workers."""
+    if task.engine not in ("codex", "gemini") or WORK_STYLE in task.goal:
+        return task
+    if task.engine == "gemini":
+        try:
+            adapter = adapter if adapter is not None else get_adapter(task.engine)
+            check_commands = getattr(adapter, "headless_commands_allowed", None)
+            commands_allowed = (check_commands() is True) if check_commands is not None else False
+        except Exception:
+            commands_allowed = False
+        if not commands_allowed:
+            return task
+    return dataclasses.replace(task, goal=f"{WORK_STYLE}\n\nTask: {task.goal}")
 
 
 def with_own_check(task: ControlTask, script: Path) -> ControlTask:
@@ -281,21 +342,38 @@ def with_own_check(task: ControlTask, script: Path) -> ControlTask:
 def run_task(task: ControlTask, *, run_id: str, log: RunLog, worktree: TaskWorktree,
              adapter=None, timeout: int | None = None,
              stall_settings: dict[str, float] | None = None,
-             sandbox: Callable[[], str | None] | None = None) -> ControlResult:
-    """Run one task to completion inside *worktree*, streaming events to *log*."""
+             sandbox: Callable[[], str | None] | None = None,
+             on_spawn: Callable[[dict[str, Any]], None] | None = None) -> ControlResult:
+    """Run one task to completion inside *worktree*, streaming events to *log*.
+    *on_spawn* receives the ``pid``/``started``/``worktree`` of the engine group the
+    moment it exists; without it nothing about the spawn is logged."""
     engine = adapter if adapter is not None else get_adapter(task.engine)
     # Older duck-typed adapters implement only the streaming contract. The built-in
     # adapters always provide this check for their repository-scoped configuration.
     check_repository = getattr(engine, "repository_problem", None)
     reason = check_repository(worktree) if check_repository is not None else None
+    # agy can silently deny permission-state writes; verify external state ourselves.
+    snapshot = getattr(engine, "permissions_snapshot", None)
+    before = None
+    if reason is None and snapshot is not None:
+        try:
+            before = snapshot()
+        except OSError as exc:
+            reason = f"could not snapshot gemini permission state ({exc})"
+    if reason is None and engine.name == "gemini":
+        try:
+            engine.model_id(task)
+        except ValueError as exc:
+            reason = str(exc)
     if reason:
         log.append_next(task.id, [RawEvent(kind="error", payload={"message": reason})],
                         engine=engine.name, now=time.time())
         return ControlResult(task_id=task.id, engine=engine.name, ok=False, text=reason,
-                             session_id=None, unproven_reason=reason)
-    task = with_report_request(with_check_guidance(with_verify_note(with_files_hint(task))))
+                             session_id=None, unproven_reason=reason, failure_mode="guard")
+    task = with_work_style(with_report_request(with_check_guidance(
+        with_verify_note(with_files_hint(task)), adapter=engine)), adapter=engine)
     script = None
-    if task.verify and engine.name == "claude" and sandbox is not None:
+    if task.policy.write and task.verify and engine.name == "claude" and sandbox is not None:
         codex_path = sandbox()
         if codex_path:
             script = check_script_path(run_id, task.id)
@@ -303,9 +381,28 @@ def run_task(task: ControlTask, *, run_id: str, log: RunLog, worktree: TaskWorkt
     try:
         if script is not None:
             write_check_script(codex_path, worktree.path, task.verify, path=script)
-        return _run_task_engine(task, run_id=run_id, log=log, worktree=worktree,
-                                engine=engine, timeout=timeout,
-                                stall_settings=stall_settings)
+        result = _run_task_engine(task, run_id=run_id, log=log, worktree=worktree,
+                                  engine=engine, timeout=timeout,
+                                  stall_settings=stall_settings, on_spawn=on_spawn)
+        reasons = []
+        # Both initial runs and resumes must reject plan-mode edits before landing.
+        if engine.name == "gemini" and not task.policy.write and result.diff:
+            reasons.append("read-only gemini task changed files")
+        if snapshot is not None:
+            try:
+                after = snapshot()
+                changed = sorted(str(path) for path in before.keys() | after.keys()
+                                 if before.get(path) != after.get(path) or
+                                 (path in before) != (path in after))
+                if changed:
+                    reasons.append(f"gemini permission state changed: {', '.join(changed)}")
+            except OSError as exc:
+                reasons.append(f"could not snapshot gemini permission state ({exc})")
+        if reasons:
+            # A safety failure must also stop usage-limit handoffs from landing edits.
+            result = dataclasses.replace(result, ok=False, limit=None, failure_mode="guard",
+                                         unproven_reason="; ".join(reasons))
+        return result
     finally:
         if script is not None:
             try:
@@ -316,23 +413,26 @@ def run_task(task: ControlTask, *, run_id: str, log: RunLog, worktree: TaskWorkt
 
 def _run_task_engine(task: ControlTask, *, run_id: str, log: RunLog,
                      worktree: TaskWorktree, engine, timeout: int | None,
-                     stall_settings: dict[str, float] | None = None) -> ControlResult:
+                     stall_settings: dict[str, float] | None = None,
+                     on_spawn: Callable[[dict[str, Any]], None] | None = None) -> ControlResult:
     """Stream the engine after run_task has prepared its temporary check."""
     settings = stall_settings if stall_settings is not None else stall.parse_settings(None)
     argv = engine.build_argv(task, cwd=worktree.path)
+    previous_wall, previous_mono = time.time(), time.monotonic()
+    deadline = previous_mono + (timeout or _DEFAULT_TIMEOUT_SECONDS)
     try:
         # stdin must be closed: claude otherwise waits 3s for piped input.
         process = subprocess.Popen(
-            argv, cwd=str(worktree.path), stdin=subprocess.DEVNULL,
+            argv, cwd=str(worktree.path.resolve() if engine.name == "gemini" else worktree.path),
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            encoding="utf-8", errors="replace", env=engine_env(),
+            encoding="utf-8", errors="replace", env=getattr(engine, "engine_env", engine_env)(),
             **group_popen_kwargs())
     except (OSError, subprocess.SubprocessError) as exc:
         logger.warning("hermes-control: %s failed to start: %s", task.engine, exc)
         return ControlResult(task_id=task.id, engine=engine.name, ok=False, text=str(exc),
                              session_id=None, unproven_reason="engine failed to start",
                              failure_mode="start-failure")
-
     # Drain stderr on its own thread from the moment the engine spawns: reading
     # only stdout below would deadlock forever the instant a child fills the OS
     # pipe buffer on stderr, since nothing would ever read it.
@@ -352,15 +452,24 @@ def _run_task_engine(task: ControlTask, *, run_id: str, log: RunLog,
                                      daemon=True)
     stdout_thread.start()
 
+    if on_spawn is not None:
+        # The group leader's pid and start time are what a later reader needs to tell
+        # whether this engine is still running after the Hermes process has died. Taken
+        # only now: `ps` can take seconds, and the pipes must be drained meanwhile.
+        try:
+            on_spawn({"pid": process.pid, "started": process_start_time(process.pid),
+                      "worktree": pauses.worktree_to_dict(worktree)})
+        except Exception:  # noqa: BLE001 - recording the spawn must never fail the task
+            logger.warning("hermes-control: could not record the spawn of task %s", task.id,
+                           exc_info=True)
+
     raws: list = []
     timed_out = False
     stalled_reason = None
-    previous_wall, previous_mono = time.time(), time.monotonic()
     last_event = previous_mono
     wake_at = None
     wake_logged = False
     stdout_closed = False
-    deadline = previous_mono + (timeout or _DEFAULT_TIMEOUT_SECONDS)
     try:
         while True:
             remaining = deadline - time.monotonic()
@@ -485,7 +594,7 @@ def _run_task_engine(task: ControlTask, *, run_id: str, log: RunLog,
     if stalled_reason is not None:
         return dataclasses.replace(result, ok=False, failure_mode="stall",
                                    unproven_reason=_with_stderr(stalled_reason))
-    if returncode != 0:
+    if returncode != 0 or (engine.name == "gemini" and not result.ok):
         return dataclasses.replace(
             result, ok=False, failure_mode=result.failure_mode or "engine-exit",
             unproven_reason=_with_stderr(result.unproven_reason or f"engine exited {returncode}"))
@@ -511,6 +620,8 @@ def _plan_payload(routed: Sequence[tuple[ControlTask, dict[str, Any] | None]],
     not where the planner sent it."""
     return {"tasks": [
         {"id": task.id, "engine": task.engine, "why": task.why,
+         # What recover.py needs to rebuild a task whose process died before pausing it.
+         "goal": task.goal, "files_hint": list(task.files_hint),
          "policy": "write" if task.policy.write else "read-only",
          "depends_on": list(task.depends_on), "verify": task.verify, "red": task.red,
          "model": task.model, "effort": task.effort, "rerouted": rerouted}
@@ -536,6 +647,8 @@ class _Context:
     parallel_settings: dict[str, Any] = dataclasses.field(
         default_factory=lambda: parallel.parse_parallel(None))
     stall_settings: dict[str, float] = dataclasses.field(default_factory=stall.read_settings)
+    fallback: routing.Fallback = dataclasses.field(default_factory=dict)
+    routing_error: str | None = None
 
 
 @dataclasses.dataclass
@@ -569,10 +682,48 @@ def _log(ctx: _Context, task_id: str, engine: str, kind: str, payload: dict[str,
                         engine=engine, now=time.time())
 
 
-def _free_engine(ctx: _Context, *, besides: str | None = None) -> str | None:
+def _routing_settings() -> tuple[Any, str | None]:
+    """Read once for fallback and stall settings in this run."""
+    try:
+        settings = routing.read_settings()
+        return ({} if settings is None else settings), None
+    except Exception as exc:  # noqa: BLE001 - settings must not strand an accepted run
+        _warn_routing_read_failure()
+        return {}, _settings_error(exc)
+
+
+def _settings_error(exc: Exception) -> str:
+    return " ".join(f"{type(exc).__name__}: {exc}".split())[:300]
+
+
+@functools.cache
+def _warn_routing_read_failure() -> None:
+    logger.warning("hermes-control: could not read routing settings; using the defaults",
+                   exc_info=True)
+
+
+@functools.cache
+def _warn_invalid_fallback() -> None:
+    logger.warning("hermes-control: fallback settings are invalid; using the defaults",
+                   exc_info=True)
+
+
+def _fallback(policy: dict[str, Any] | None = None, *,
+              settings: Any = None) -> tuple[routing.Fallback, str | None]:
+    try:
+        return routing.read_fallback(policy, settings=settings), None
+    except Exception as exc:  # noqa: BLE001 - settings must not strand an accepted run
+        _warn_invalid_fallback()
+        return {}, _settings_error(exc)
+
+
+def _free_engine(ctx: _Context, *, besides: str | None = None,
+                 earlier: dict[str, Any] | None = None) -> str | None:
     """A signed-in engine that is neither over its cap nor stopped by its limit."""
-    for name in ctx.signed_in:
-        if name != besides and limits.engine_hold(name, caps=ctx.caps) is None:
+    order = (routing.fallback_order(besides, ctx.fallback, engines=ctx.signed_in, earlier=earlier)
+             if besides else ctx.signed_in)
+    for name in order:
+        if name in ctx.signed_in and limits.engine_hold(name, caps=ctx.caps) is None:
             return name
     return None
 
@@ -594,16 +745,21 @@ def _holds(signed_in: Sequence[str], caps: dict[str, int]) -> tuple[str, float |
 
 def _move(ctx: _Context, task: ControlTask, engine: str, reason: str,
           earlier: dict[str, Any] | None) -> tuple[ControlTask, dict[str, Any]]:
-    moved, note = move(task, engine, reason)
+    moved, note = move(task, engine, reason, fallback=ctx.fallback, policy=ctx.policy,
+                       earlier=earlier)
     if earlier:
         note["earlier"] = earlier
-    moved = model_policy.apply_policy(moved, ctx.policy)
     note.update(model=moved.model, effort=moved.effort)
     return moved, note
 
 
 def with_continuation(task: ControlTask, *, previous: str) -> ControlTask:
     """For a new session in a worktree where an earlier worker left unfinished edits."""
+    if task.engine == "gemini":
+        return dataclasses.replace(task, resume_session=None, goal=(
+            f"{task.goal}\n\nAn earlier worker ({previous}) started this task and stopped before "
+            "finishing, because it hit a usage limit. Its unfinished edits are already in "
+            "the files: read the files you need, keep what is right, and finish the task."))
     return dataclasses.replace(task, resume_session=None, goal=(
         f"{task.goal}\n\nAn earlier worker ({previous}) started this task and stopped before "
         f"finishing, because it hit a usage limit. Its unfinished edits are already in this "
@@ -620,7 +776,8 @@ def with_resume(task: ControlTask, *, session_id: str) -> ControlTask:
 
 def _pause(ctx: _Context, original: ControlTask, *, worktree: TaskWorktree | None, engine: str,
            session_id: str | None, reason: str, until: float | None,
-           rerouted: dict[str, Any] | None, last_run: ControlTask | None = None) -> pauses.Pause:
+           rerouted: dict[str, Any] | None, last_run: ControlTask | None = None,
+           pid: int | None = None, started: str | None = None) -> pauses.Pause:
     ran = last_run or original
     record = pauses.Pause(
         id=pauses.pause_id(ctx.run_id, original.id), run_id=ctx.run_id,
@@ -628,7 +785,7 @@ def _pause(ctx: _Context, original: ControlTask, *, worktree: TaskWorktree | Non
             original, engine=engine, model=ran.model, effort=ran.effort)), repo=ctx.repo,
         worktree=pauses.worktree_to_dict(worktree) if worktree else None, engine=engine,
         session_id=session_id, reason=reason, resets_at=until, paused_at=time.time(),
-        rerouted=rerouted)
+        rerouted=rerouted, pid=pid, started=started)
     pauses.save(record)
     _log(ctx, original.id, engine, "paused",
          {"id": record.id, "reason": reason, "resets_at": until, "worktree": record.worktree})
@@ -662,7 +819,7 @@ def _run_guarded(ctx: _Context, task: ControlTask, worktree: TaskWorktree, *,
             reason = f"refused to run claude: {detail}, which claude would load as settings"
             _log(ctx, task.id, task.engine, "error", {"message": reason})
             return ControlResult(task_id=task.id, engine=task.engine, ok=False, text=reason,
-                                 session_id=None, unproven_reason=reason)
+                                 session_id=None, unproven_reason=reason, failure_mode="guard")
     if continued and task.engine == "codex":
         paths, failure = changed_codex_paths(worktree)
         if failure or paths:
@@ -671,12 +828,24 @@ def _run_guarded(ctx: _Context, task: ControlTask, worktree: TaskWorktree, *,
             reason = f"refused to run codex: {detail}, which codex would load as settings"
             _log(ctx, task.id, task.engine, "error", {"message": reason})
             return ControlResult(task_id=task.id, engine=task.engine, ok=False, text=reason,
-                                 session_id=None, unproven_reason=reason)
+                                 session_id=None, unproven_reason=reason, failure_mode="guard")
+    if continued and task.engine == "gemini":
+        paths, failure = changed_gemini_paths(worktree)
+        if failure or paths:
+            detail = (f"could not check .agents/ and .gemini/ ({failure})" if failure else
+                      f"the worktree changed .agents/ or .gemini/ ({', '.join(paths)})")
+            reason = f"refused to run gemini: {detail}, which agy would load as settings or hooks"
+            _log(ctx, task.id, task.engine, "error", {"message": reason})
+            return ControlResult(task_id=task.id, engine=task.engine, ok=False, text=reason,
+                                 session_id=None, unproven_reason=reason, failure_mode="guard")
     with engine_slot(task.engine, ctx.parallel_settings["per_engine"][task.engine],
                      on_wait=lambda payload: _log(
                          ctx, task.id, task.engine, "slot_wait", payload)):
+        # Both run paths (a dispatch and resume_paused) reach the engine through here.
         return run_task(task, run_id=ctx.run_id, log=ctx.log, worktree=worktree,
-                        timeout=ctx.timeout, sandbox=sandbox, stall_settings=ctx.stall_settings)
+                        timeout=ctx.timeout, sandbox=sandbox, stall_settings=ctx.stall_settings,
+                        on_spawn=lambda payload: _log(ctx, task.id, task.engine, "spawned",
+                                                      payload))
 
 
 def _execute(ctx: _Context, original: ControlTask, run: ControlTask,
@@ -688,14 +857,18 @@ def _execute(ctx: _Context, original: ControlTask, run: ControlTask,
     if result.limit is None:
         return _Outcome(run, result, rerouted)
     limits.forget(result.engine)
-    other = _free_engine(ctx, besides=result.engine)
+    other = _free_engine(ctx, besides=result.engine,
+                         **({"earlier": rerouted} if ctx.fallback else {}))
     _log(ctx, original.id, result.engine, "limit",
          {"message": result.limit.message, "resets_at": result.limit.resets_at,
           "next": other or "pause"})
     if other is None:
         return _Outcome(run, result, rerouted,
                         _pause_after_limit(ctx, original, worktree, run, result, rerouted))
-    moved, note = _move(ctx, original, other, f"{result.engine} hit its usage limit "
+    # Use the engine/model that actually ran, while rebuilding continuation text
+    # from the original goal when a resumed worker hits another limit.
+    current = dataclasses.replace(run, goal=original.goal, resume_session=None)
+    moved, note = _move(ctx, current, other, f"{result.engine} hit its usage limit "
                                               f"({result.limit.message})", rerouted)
     note["continued"] = True
     _log(ctx, original.id, other, "rerouted", note)
@@ -740,7 +913,7 @@ def _paused_entry(task: ControlTask, record: pauses.Pause, *, result: ControlRes
     after = f" after {limits.when(record.resets_at)}" if record.resets_at else ""
     return {
         "task_id": task.id, "engine": record.engine, "ok": False,
-        "text": result.text if result else "",
+        "text": _redact(result.text) if result else "",
         "diff_stat": _diff_stat(result.diff) if result else "+0/-0",
         "verdict": "not-committed",
         "unproven_reason": (f"paused: {record.reason}. Nothing was committed; the user resumes "
@@ -866,11 +1039,13 @@ def _log_summary(log: RunLog, run_id: str, entries: Sequence[dict[str, Any]],
                  repo: str | None) -> list[dict[str, Any]]:
     """Settle these tasks in the log, so the Runs view knows they are over."""
     with _resume_summary_lock(run_id):
-        return _log_summary_unlocked(log, run_id, entries, repo)
+        overlaps, _ = _log_summary_unlocked(log, run_id, entries, repo)
+        return overlaps
 
 
 def _log_summary_unlocked(log: RunLog, run_id: str, entries: Sequence[dict[str, Any]],
-                          repo: str | None) -> list[dict[str, Any]]:
+                          repo: str | None, *, routing_error: str | None = None
+                          ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     """_log_summary for a caller already holding _resume_summary_lock(run_id)."""
     compact = [{"task_id": e["task_id"], "engine": e["engine"], "ok": e["ok"],
                 "commit": e["commit"], "branch": e["branch"], "worktree": e["worktree"],
@@ -893,13 +1068,26 @@ def _log_summary_unlocked(log: RunLog, run_id: str, entries: Sequence[dict[str, 
     except Exception:  # noqa: BLE001 - still attempt to log the summary
         logger.warning("hermes-control: could not continue run %s log sequences",
                        run_id, exc_info=True)
+    # Keep the latest settings diagnostic across the plan and all resumes,
+    # including when a later resume runs after the config was corrected.
+    diagnostic = None
+    try:
+        diagnostic = next((event.payload["routing"] for event in reversed(log.read_all())
+                           if event.kind in ("plan", "resumed")
+                           and event.payload.get("routing")), None)
+    except Exception:  # noqa: BLE001 - still append task results if the read failed
+        logger.warning("hermes-control: could not read run %s routing diagnostic", run_id,
+                       exc_info=True)
+    if routing_error:
+        diagnostic = {"error": routing_error}
     try:
         log.append_next(_PLAN_EVENT_TASK_ID, [RawEvent(kind="summary", payload={
-            "tasks": compact, "overlaps": overlaps})],
+            "tasks": compact, "overlaps": overlaps,
+            **({"routing": diagnostic} if diagnostic else {})})],
                         engine=_PLAN_EVENT_ENGINE, now=time.time())
     except Exception:  # noqa: BLE001 - keep the results and warnings even if logging fails
         logger.exception("hermes-control: could not log run %s summary", run_id)
-    return overlaps
+    return overlaps, diagnostic
 
 
 @contextmanager
@@ -932,6 +1120,9 @@ def _resume_summary_lock(run_id: str) -> Iterator[None]:
 def _log_resume_summary(log: RunLog, run_id: str, entries: Sequence[dict[str, Any]],
                         repo: str | None) -> None:
     """Retain every task's latest summary entry when resuming part of a run."""
+    # This resume's error takes precedence over earlier diagnostics in the log.
+    routing_error = next(((entry.get("routing") or {}).get("error") for entry in entries
+                          if (entry.get("routing") or {}).get("error")), None)
     with _resume_summary_lock(run_id):
         with _REGISTRY_LOCK:
             finished = _FINISHED.get(run_id)
@@ -955,9 +1146,11 @@ def _log_resume_summary(log: RunLog, run_id: str, entries: Sequence[dict[str, An
             latest[entry["task_id"]] = entry
         tasks = list(latest.values())
         overlaps = []
+        diagnostic = {"error": routing_error} if routing_error else None
         log.summary_seq = None
         try:
-            overlaps = _log_summary_unlocked(log, run_id, tasks, repo)
+            overlaps, diagnostic = _log_summary_unlocked(log, run_id, tasks, repo,
+                                                         routing_error=routing_error)
         finally:
             # On append failure retain the watermark already reflected in tasks,
             # so an older on-disk result cannot undo this resume next time. Only a
@@ -973,6 +1166,10 @@ def _log_resume_summary(log: RunLog, run_id: str, entries: Sequence[dict[str, An
                         summary["overlaps"] = overlaps
                     else:
                         summary.pop("overlaps", None)
+                    if diagnostic is not None:
+                        summary["routing"] = diagnostic
+                    else:
+                        summary.pop("routing", None)
                     _FINISHED[run_id] = summary
 
 
@@ -997,10 +1194,8 @@ def _prepare(raw_tasks: Sequence[dict[str, Any]], *, run_id: str, log: RunLog,
     # #5: the schema marks `why` required, but only this makes it true.
     tasks = order_tasks(parse_tasks(raw_tasks, require_why=True))
     # Checked once per run, before any worktree exists: a signed-out engine's
-    # tasks move to one that can run them, and with none usable nothing starts.
+    # tasks move to an allowed destination, or wait when their list has none usable.
     status = engine_status(get_adapter)
-    routed = route(tasks, status)
-    # After routing, so a moved task gets its new engine's default model.
     try:
         policy = model_policy.load_policy()
     except ValueError as exc:
@@ -1008,13 +1203,18 @@ def _prepare(raw_tasks: Sequence[dict[str, Any]], *, run_id: str, log: RunLog,
             f"Hermes-Control model settings are invalid ({exc}); fix them on the dashboard's "
             "Engines tab or under plugins.entries.hermes_control.settings.models in "
             "config.yaml") from None
+    settings, settings_error = _routing_settings()
+    fallback, fallback_error = _fallback(policy, settings=settings)
+    routed = route(tasks, status, fallback=fallback, policy=policy)
     routed = [(model_policy.apply_policy(task, policy), rerouted)
               for task, rerouted in routed]
 
     parallel_settings, parallel_error = _parallel()
     ctx = _Context(run_id=run_id, log=log, repo=parent_cwd,
                    signed_in=[name for name in ENGINE_NAMES if status.get(name) is None],
-                   caps=_caps(), policy=policy, timeout=timeout, parallel_settings=parallel_settings)
+                   caps=_caps(), policy=policy, timeout=timeout, parallel_settings=parallel_settings,
+                   fallback=fallback, routing_error=settings_error or fallback_error,
+                   stall_settings=stall.parse_settings(settings))
 
     # Log the plan itself, before any task runs, so the log reads
     # plan-then-execution and each engine's `why` is on record even after the
@@ -1022,6 +1222,7 @@ def _prepare(raw_tasks: Sequence[dict[str, Any]], *, run_id: str, log: RunLog,
     log.append_next(_PLAN_EVENT_TASK_ID, [RawEvent(kind="plan", payload={
         **_plan_payload(routed), "repo": parent_cwd, "planner": _planner(planner_session),
         "parallel": {**parallel_settings, "error": parallel_error},
+        **({"routing": {"error": ctx.routing_error}} if ctx.routing_error else {}),
         "stall": ctx.stall_settings})],
         engine=_PLAN_EVENT_ENGINE, now=time.time())
 
@@ -1076,9 +1277,13 @@ def _run_routed(ctx: _Context,
                 return
             # Admission's handshake preserves planned order without holding the
             # bookkeeping lock across usage reads, which may start a process or use the network.
-            hold = limits.engine_hold(task.engine, caps=ctx.caps)
+            hold = (limits.engine_hold(task.engine, caps=ctx.caps)
+                    if task.engine in ctx.signed_in
+                    else (f"{task.engine} is disabled" if task.engine not in ENGINE_NAMES
+                          else f"{task.engine} is not signed in", None))
             if hold is not None:
-                other = _free_engine(ctx, besides=task.engine)
+                other = _free_engine(ctx, besides=task.engine,
+                                     **({"earlier": rerouted} if ctx.fallback else {}))
                 if other is None:
                     reason, until = _holds(ctx.signed_in, ctx.caps)
                     record = _pause(ctx, task, worktree=None, engine=task.engine,
@@ -1093,10 +1298,10 @@ def _run_routed(ctx: _Context,
                 if admitted is not None:
                     # A cap move uses the destination's slot. Defer without occupying
                     # a worker or a total slot when that engine is already full.
-                    if active[task.engine] >= settings["per_engine"][task.engine]:
+                    if active.get(task.engine, 0) >= settings["per_engine"].get(task.engine, 1):
                         pending[index] = (task, rerouted)
                         return
-                    active[task.engine] += 1
+                    active[task.engine] = active.get(task.engine, 0) + 1
                     counted_engine = task.engine
                     admitted.set()
             # The worktree id is scoped to the run: task ids repeat across runs by
@@ -1155,7 +1360,7 @@ def _run_routed(ctx: _Context,
                         paused_ids.add(task.id)
                     settled.add(task.id)
                 if counted_engine is not None:
-                    active[counted_engine] -= 1
+                    active[counted_engine] = active.get(counted_engine, 0) - 1
                 if admitted is not None:
                     admitted.set()
 
@@ -1170,8 +1375,8 @@ def _run_routed(ctx: _Context,
                 with state_lock:
                     ready = next((index for index in sorted(pending)
                                   if all(d in settled for d in pending[index][0].depends_on)
-                                  and active[pending[index][0].engine]
-                                  < settings["per_engine"][pending[index][0].engine]), None)
+                                  and active.get(pending[index][0].engine, 0)
+                                  < settings["per_engine"].get(pending[index][0].engine, 1)), None)
                     if sum(active.values()) >= settings["max_tasks"]:
                         ready = None
                     item = pending.pop(ready) if ready is not None else None
@@ -1226,13 +1431,16 @@ def dispatch(raw_tasks: Sequence[dict[str, Any]], *, parent_cwd: str | None,
     # feeds that to the loop guardrail, so even `"error": null` marks a clean run as failed.
     result = {"run_id": run_id, "run_log": str(log.path), "tasks": entries,
               "state": "finished"}
+    if ctx.routing_error:
+        result["routing"] = {"error": ctx.routing_error}
     if overlaps:
         result["overlaps"] = overlaps
     return result
 
 
 def resume_blocker(record: pauses.Pause, *, signed_in: Sequence[str] | None = None,
-                   caps: dict[str, int] | None = None) -> tuple[str, str | None]:
+                   caps: dict[str, int] | None = None,
+                   fallback: routing.Fallback | None = None) -> tuple[str, str | None]:
     """``(reason, None)`` when *record* cannot resume now, else ``("", engine)`` with
     the engine it would run on. *signed_in* defaults to every engine: the dashboard
     asks often, and the resume itself checks sign-in for real."""
@@ -1242,9 +1450,27 @@ def resume_blocker(record: pauses.Pause, *, signed_in: Sequence[str] | None = No
     if blocking is not None:
         first = blocking.task["id"]
         return f"this task depends on {first}, which is still paused: resume {first} first", None
+    try:
+        events = RunLog(record.run_id).read_all()
+    except Exception as exc:  # noqa: BLE001 - report log failures to the dashboard
+        return f"could not read its run log: {exc}", None
+    # The latest attempt counts: a resume that died left a newer pid than the pause record.
+    spawned = next((e.payload for e in reversed(events)
+                    if e.task_id == record.task["id"] and e.kind == "spawned"), None) or {}
+    pid = spawned.get("pid")
+    if isinstance(pid, int) and not isinstance(pid, bool):
+        running = proctree.group_still_running(pid, spawned.get("started"))
+        if running:
+            return (f"the earlier engine (pid {pid}) is still running in its worktree; "
+                    "stop it or wait, then resume"), None
+        if running is None:
+            return (f"could not check whether the earlier engine (pid {pid}) is still "
+                    "running; resume once it has stopped"), None
     signed_in = list(ENGINE_NAMES) if signed_in is None else list(signed_in)
     caps = caps if caps is not None else _caps()
-    order = [record.engine] + [name for name in signed_in if name != record.engine]
+    fallback = _fallback()[0] if fallback is None else fallback
+    order = [record.engine] + routing.fallback_order(
+        record.engine, fallback, engines=signed_in, earlier=record.rerouted)
     pick = next((name for name in order if name in signed_in
                  and limits.engine_hold(name, caps=caps) is None), None)
     if pick is None:
@@ -1292,12 +1518,17 @@ def resume_paused(record_id: str, *, timeout: int | None = None) -> dict[str, An
             raise NotReady(f"Hermes-Control model settings are invalid ({exc})") from None
         status = engine_status(get_adapter)
         log.continue_sequences()
+        settings, settings_error = _routing_settings()
+        fallback, fallback_error = _fallback(policy, settings=settings)
         ctx = _Context(run_id=record.run_id, log=log, repo=record.repo,
                        signed_in=[name for name in ENGINE_NAMES if status.get(name) is None],
-                       caps=_caps(), policy=policy, timeout=timeout, parallel_settings=_parallel()[0])
+                       caps=_caps(), policy=policy, timeout=timeout, parallel_settings=_parallel()[0],
+                       fallback=fallback, routing_error=settings_error or fallback_error,
+                       stall_settings=stall.parse_settings(settings))
         for name in ENGINE_NAMES:
             limits.forget(name)  # a reset is exactly what the user is waiting on
-        reason, pick = resume_blocker(record, signed_in=ctx.signed_in, caps=ctx.caps)
+        reason, pick = resume_blocker(record, signed_in=ctx.signed_in, caps=ctx.caps,
+                                     fallback=ctx.fallback)
         if pick is None:
             raise NotReady(reason)
 
@@ -1339,7 +1570,8 @@ def resume_paused(record_id: str, *, timeout: int | None = None) -> dict[str, An
             _log(ctx, original.id, pick, "rerouted", rerouted)
         _log(ctx, original.id, pick, "resumed",
              {"id": record.id, "engine": pick, "session": run.resume_session,
-              "model": run.model, "effort": run.effort})
+              "model": run.model, "effort": run.effort,
+              **({"routing": {"error": ctx.routing_error}} if ctx.routing_error else {})})
 
         sandbox = functools.cache(find_sandbox)
         outcome = _execute(ctx, original, run, rerouted, worktree, sandbox=sandbox,
@@ -1348,6 +1580,8 @@ def resume_paused(record_id: str, *, timeout: int | None = None) -> dict[str, An
             entry = _paused_entry(outcome.task, outcome.pause, result=outcome.result,
                                   worktree=worktree, rerouted=outcome.rerouted)
             entry["skipped_dependents"] = []
+            if ctx.routing_error:
+                entry["routing"] = {"error": ctx.routing_error}
             try:
                 _log_resume_summary(log, record.run_id, [entry], record.repo)
             except Exception:  # noqa: BLE001 - task result survives a summary log failure
@@ -1396,6 +1630,8 @@ def resume_paused(record_id: str, *, timeout: int | None = None) -> dict[str, An
         finally:
             pauses.remove(record.id)
         entry["skipped_dependents"] = skipped_ids
+        if ctx.routing_error:
+            entry["routing"] = {"error": ctx.routing_error}
         try:
             _log_resume_summary(log, record.run_id, [entry, *skipped_entries], record.repo)
         except Exception:  # noqa: BLE001 - task result survives a summary log failure
@@ -1513,6 +1749,8 @@ def start_dispatch(raw_tasks: Sequence[dict[str, Any]], *, parent_cwd: str | Non
         finally:
             summary = {"run_id": run_id, "run_log": str(log.path), "tasks": entries,
                        "state": "finished"}
+            if ctx.routing_error:
+                summary["routing"] = {"error": ctx.routing_error}
             if overlaps:
                 summary["overlaps"] = overlaps
             if note:
@@ -1549,11 +1787,27 @@ def control_status(run_id: str, wait: float = 0.0) -> dict[str, Any]:
         return {"error": f"no run {run_id}"}
     with _REGISTRY_LOCK:
         thread = _THREADS.get(run_id)
+    if thread is None:
+        # Not this process's run: if its Hermes process died, pause its tasks first.
+        from . import recover
+
+        recover.reconcile(run_id)
     waited_seconds = 0.0
     if thread is not None and thread.is_alive() and wait > 0:
         wait_started = time.monotonic()
         thread.join(timeout=min(wait, MAX_STATUS_WAIT_SECONDS))
         waited_seconds = time.monotonic() - wait_started
+    elif wait > 0 and _run_is_live(run_id) is True:
+        wait_started = time.monotonic()
+        deadline = wait_started + min(wait, MAX_STATUS_WAIT_SECONDS)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(5.0, remaining))
+            if _run_is_live(run_id) is not True:
+                break
+        waited_seconds += time.monotonic() - wait_started
     if thread is not None and thread.is_alive():
         result = {"run_id": run_id, "state": "running",
                   "tasks": _live_status_tasks(runs.run_view(run_id))}
@@ -1579,6 +1833,8 @@ def control_status(run_id: str, wait: float = 0.0) -> dict[str, Any]:
             result["overlaps"] = finished["overlaps"]
         if finished.get("note"):
             result["note"] = finished["note"]
+        if finished.get("routing"):
+            result["routing"] = finished["routing"]
         _log_status_checked(run_id, result["state"], waited_seconds)
         return result
     if finished is not None:
@@ -1594,6 +1850,8 @@ def control_status(run_id: str, wait: float = 0.0) -> dict[str, Any]:
             result["overlaps"] = overlaps
         if finished.get("note"):
             result["note"] = finished["note"]
+        if latest.payload.get("routing"):
+            result["routing"] = latest.payload["routing"]
         with _REGISTRY_LOCK:
             _FINISHED[run_id] = {**result, "_summary_seq": latest.seq}
         _log_status_checked(run_id, result["state"], waited_seconds)
@@ -1608,7 +1866,10 @@ def control_status(run_id: str, wait: float = 0.0) -> dict[str, Any]:
         if overlaps:
             result["overlaps"] = overlaps
     else:
-        result = {"run_id": run_id, "state": "stopped", "tasks": _live_status_tasks(view)}
+        state = "running" if _run_is_live(run_id) is True else "stopped"
+        result = {"run_id": run_id, "state": state, "tasks": _live_status_tasks(view)}
+    if latest and latest.payload.get("routing"):
+        result["routing"] = latest.payload["routing"]
     _log_status_checked(run_id, result["state"], waited_seconds)
     return result
 

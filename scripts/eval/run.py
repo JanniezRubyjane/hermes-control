@@ -26,34 +26,46 @@ def profile_name() -> str:
     return f"hc-eval-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(4)}"
 
 
-def create_eval_home(source: Path, out: Path) -> Path:
+def create_eval_home(source: Path, out: Path, plugin_root: Path | None = None) -> Path:
     home = source / "profiles" / profile_name()
     try:
-        home.mkdir(parents=True, exist_ok=False)
+        home.mkdir(mode=0o700, parents=True, exist_ok=False)
     except FileExistsError as exc:
         raise FileExistsError(f"evaluation profile already exists: {home}") from exc
+    home.chmod(0o700)
     for name in ("config.yaml", ".env"):
         if (source / name).is_file():
             shutil.copy2(source / name, home / name)
+            if name == ".env":
+                (home / name).chmod(0o600)
     for name in ("plugins/hermes_control", "skills/software-development/hermes-control"):
         link = source / name
-        if link.is_symlink():
+        if plugin_root is not None or link.is_symlink():
+            if plugin_root is None:
+                target = link.resolve()
+            else:
+                relative = "hermes_control" if name.startswith("plugins/") else "skills/hermes-control"
+                target = plugin_root.expanduser().resolve() / relative
             destination = home / name
             destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.symlink_to(link.resolve(), target_is_directory=True)
+            destination.symlink_to(target, target_is_directory=True)
     return home
 
 
 def copy_evidence(home: Path, out: Path, prompt_id: str) -> tuple[Path, Path, list[Path]]:
     evidence = out / "evidence" / prompt_id
-    evidence.mkdir(parents=True, exist_ok=False)
+    evidence.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    evidence.parent.chmod(0o700)
+    evidence.mkdir(mode=0o700, exist_ok=False)
+    evidence.chmod(0o700)
     for name in ("config.yaml",):
         if (home / name).is_file():
             shutil.copy2(home / name, evidence / name)
     logs = []
     for path in sorted((home / "control").glob("run-*.jsonl")):
         target = evidence / "control" / path.name
-        target.parent.mkdir(parents=True, exist_ok=True)
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        target.parent.chmod(0o700)
         shutil.copy2(path, target)
         logs.append(target)
     db_copy = evidence / "state.db"
@@ -73,7 +85,15 @@ def verify_command(source: Path) -> str:
     python = lines[0].strip() if lines else ""
     if not python or not Path(python).is_file():
         raise ValueError("verification Python missing; run scripts/verify-setup.sh")
-    return f"PYTHONPATH={shlex.quote(str(verify / 'site'))} {shlex.quote(python)} -m pytest -q -p no:cacheprovider"
+    pythonpath = [str(verify / "site")]
+    hermes_path = verify / "hermes-path"
+    if hermes_path.is_file():
+        entries = hermes_path.read_text(encoding="utf-8").splitlines()
+        if (verify / "hermes-src").is_dir():
+            pythonpath.append(str(verify / "hermes-src"))
+            entries = entries[1:]
+        pythonpath.extend(entries)
+    return f"PYTHONNOUSERSITE=1 PYTHONPATH={shlex.quote(':'.join(pythonpath))} {shlex.quote(python)} -m pytest -q -p no:cacheprovider"
 
 
 def answer_with_reason(home: Path, transcript: str, started: float, ended: float) -> tuple[str, str]:
@@ -135,6 +155,7 @@ def final_answer(home: Path, transcript: str, started: float, ended: float) -> s
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, help="output directory (default: system temp)")
+    parser.add_argument("--plugin-root", type=Path, help="branch checkout supplying plugin and skill")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--live", action="store_true", help="allow quota-consuming Hermes calls")
     parser.add_argument("--keep-home", action="store_true", help="keep the temporary Hermes profile")
@@ -164,12 +185,18 @@ def main(argv: list[str] | None = None) -> int:
                   f"--oneshot --in {project}")
         print(f"records: {out / 'prompts.jsonl'}")
         return 0
-    out.mkdir(parents=True, exist_ok=True)
+    try:
+        out.mkdir(mode=0o700, parents=True)
+    except FileExistsError:
+        if not out.is_dir():
+            raise
+    else:
+        out.chmod(0o700)
     record_file = out / "prompts.jsonl"
     if record_file.exists():
         parser.error(f"{record_file} already exists; choose a new --out")
     try:
-        home = create_eval_home(source, out)
+        home = create_eval_home(source, out, plugin_root=args.plugin_root)
     except FileExistsError as exc:
         parser.error(str(exc))
     verify_python = (source / "control/verify/python-path").read_text(encoding="utf-8").splitlines()[0].strip()

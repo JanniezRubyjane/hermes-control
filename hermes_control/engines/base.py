@@ -129,6 +129,10 @@ class EngineAdapter(ABC):
     # False, a task that stopped part-way starts a new session in its worktree.
     resumes_sessions: bool = False
 
+    def engine_env(self) -> dict[str, str]:
+        """Environment for this engine's worker and account checks."""
+        return engine_env()
+
     @abstractmethod
     def probe(self) -> EngineInfo | None:
         """Engine details, or None when it cannot be used right now."""

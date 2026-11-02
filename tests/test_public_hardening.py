@@ -41,7 +41,9 @@ def repo(tmp_path):
     (repo / "a.txt").write_text("base\n")
     _git(repo, "add", ".")
     _git(repo, "commit", "-qm", "base")
-    return repo
+    task = tmp_path / "task"
+    _git(repo, "worktree", "add", "-b", "test", str(task), "HEAD")
+    return task
 
 
 def _task(engine="claude", **kwargs):
@@ -50,7 +52,8 @@ def _task(engine="claude", **kwargs):
 
 
 def _wt(repo):
-    return worktree.TaskWorktree(repo, "test", repo, _git(repo, "rev-parse", "HEAD"))
+    root = Path(_git(repo, "rev-parse", "--git-common-dir")).parent
+    return worktree.TaskWorktree(repo, "test", root, _git(repo, "rev-parse", "HEAD"))
 
 
 @pytest.mark.parametrize("supported", [True, False])

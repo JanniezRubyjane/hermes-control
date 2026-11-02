@@ -74,6 +74,8 @@ def test_forbidden_flags_contents_are_pinned_to_the_real_cli_help():
     engine renames or adds a bypass, this test is where it has to be updated.
     """
     assert FORBIDDEN_FLAGS == frozenset({
+        # agy --help (agy 1.3.5): --remote-control exposes remote session control.
+        "--remote-control",
         # claude --help: "--allow-dangerously-skip-permissions  Enable bypassing
         # all permission checks as an option, without it being enabled by default."
         "--allow-dangerously-skip-permissions",

@@ -15,6 +15,10 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TEST_GLOBS = ("tests/**", "**/test_*.py", "**/*_test.py", "**/*.test.*", "**/*.spec.*")
 DEFAULT_RED_EXIT_CODES = (1,)
+_TEST_RUNNER_CONFIG_NAMES = frozenset({
+    "conftest.py", "pytest.ini", "pyproject.toml", "setup.cfg", "tox.ini",
+    "sitecustomize.py", "usercustomize.py",
+})
 _ASSERT = re.compile(r"^\s*assert\b|\bassert\w*\(")
 
 
@@ -86,6 +90,9 @@ def advisory_warnings(task, worktree: TaskWorktree, commit: str,
     warnings.extend(f"check_gaming: command names changed non-test file {path}"
                     for path in sorted(named))
     for path, status in changed.items():
+        if status in ("A", "M") and (
+                path.rsplit("/", 1)[-1] in _TEST_RUNNER_CONFIG_NAMES or path.endswith(".pth")):
+            warnings.append(f"check_gaming: changed test-runner configuration {path}")
         if not is_test_path(path, globs):
             continue
         if status == "D":

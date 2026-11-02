@@ -179,7 +179,7 @@ def test_verify_placeholder_and_missing_setup(tmp_path):
         eval_run.verify_command(home)
     (verify / "python-path").write_text("/usr/bin/python3\n")
     command = eval_run.verify_command(home)
-    assert command == f"PYTHONPATH={verify / 'site'} /usr/bin/python3 -m pytest -q -p no:cacheprovider"
+    assert command == f"PYTHONNOUSERSITE=1 PYTHONPATH={verify / 'site'} /usr/bin/python3 -m pytest -q -p no:cacheprovider"
     prompts = json.loads((EVAL / "prompts.yaml").read_text())
     assert all("{verify}" in p["prompt"] for p in prompts if p["id"] in ("routine", "hard"))
     assert next(p for p in prompts if p["id"] == "pinned")["expect"] == "review"

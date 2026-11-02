@@ -9,7 +9,12 @@ no future edit can quietly hand a worker an escape hatch.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import stat
+from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Sequence
 
 # Flags and flag values that disable containment. Never emitted; asserted against.
@@ -17,6 +22,8 @@ from typing import Sequence
 # the provenance comments are the record, because the first version of this set
 # was written from the design doc and missed two of them.
 FORBIDDEN_FLAGS: frozenset[str] = frozenset({
+    # `agy --help` (agy 1.3.5): --remote-control exposes remote session control.
+    "--remote-control",
     # `claude --help`: "--allow-dangerously-skip-permissions  Enable bypassing all
     # permission checks as an option, without it being enabled by default."
     "--allow-dangerously-skip-permissions",
@@ -50,6 +57,9 @@ FORBIDDEN_FLAGS: frozenset[str] = frozenset({
 # cannot join FORBIDDEN_FLAGS as bare tokens, because the same word is an ordinary
 # value of other flags and the guard would then reject harmless argv.
 FORBIDDEN_FLAG_VALUES: dict[str, frozenset[str]] = {
+    # `agy --help` (agy 1.3.5): --mode accepts accept-edits, auto, plan;
+    # auto delegates approval to a classifier, with no human reviewing escapes.
+    "--mode": frozenset({"auto"}),
     # `claude --help`: --permission-mode (choices: ..., "auto", ...), and
     # `claude auto-mode`: "Inspect or reset auto mode classifier" - auto hands the
     # approval decision to a classifier, so an unattended worker has nobody in the
@@ -63,6 +73,102 @@ FORBIDDEN_FLAG_VALUES: dict[str, frozenset[str]] = {
     "-P": frozenset({":danger-full-access"}),
     "--permission-profile": frozenset({":danger-full-access"}),
 }
+
+
+def gemini_settings_problem(data: object) -> str | None:
+    """Fail closed on machine-wide agy settings we have not reviewed."""
+    if not isinstance(data, Mapping):
+        return "agy settings must be a JSON object"
+    # Unknown settings may widen access; only the probed sandbox posture is safe.
+    for key in data:
+        if key not in {"enableTerminalSandbox", "toolPermission", "trustedWorkspaces", "permissions"}:
+            return f"agy settings contains unreviewed key: {key}"
+    if data.get("enableTerminalSandbox") is not True:
+        return "agy enableTerminalSandbox must be true"
+    if "trustedWorkspaces" in data:
+        trusted = data["trustedWorkspaces"]
+        if not isinstance(trusted, list) or any(not isinstance(path, str) for path in trusted):
+            return "agy trustedWorkspaces must be a list of strings"
+    permission = data.get("toolPermission")
+    if permission is not None and permission not in (
+            "request-review", "strict", "proceed-in-sandbox"):
+        return "agy toolPermission must be request-review, strict, or proceed-in-sandbox"
+    if "toolPermission" in data and not isinstance(permission, str):
+        return "agy toolPermission must be a string"
+    permissions = data.get("permissions", {})
+    if not isinstance(permissions, Mapping):
+        return "agy permissions must be an object"
+    for key in permissions:
+        if key not in {"allow", "deny"}:
+            return f"agy permissions contains unreviewed key: {key}"
+        rules = permissions[key]
+        if not isinstance(rules, list) or any(not isinstance(rule, str) for rule in rules):
+            return f"agy permissions.{key} must be a list of strings"
+    if permissions.get("allow"):
+        return f"agy permissions.allow permits unsafe access: {permissions['allow'][0]}"
+    return None
+
+
+def gemini_permission_files_problem(home: Path, checked: dict[Path, str | None]) -> str | None:
+    """Review external agy grants and retain digests of the exact bytes reviewed."""
+    projects = home / "config" / "projects"
+    try:
+        try:
+            mode = projects.lstat().st_mode
+        except FileNotFoundError:
+            checked[projects] = None
+            entries = []
+        else:
+            if not stat.S_ISDIR(mode):
+                return f"agy projects path {projects} must be a directory, not a symlink or file"
+            checked[projects] = "directory"
+            entries = sorted(projects.iterdir())
+    except OSError as exc:
+        return f"could not read agy projects directory {projects} ({exc})"
+    for path in entries:
+        try:
+            mode = path.lstat().st_mode
+            if stat.S_ISLNK(mode):
+                return f"agy project file {path} is a symlink"
+            if not stat.S_ISREG(mode):
+                return f"agy project entry {path} must be a regular JSON file"
+            if path.name == ".DS_Store":
+                continue
+            if path.suffix != ".json":
+                return f"agy project entry {path} is not a .json file"
+            content = path.read_bytes()
+        except OSError as exc:
+            return f"could not read agy project file {path} ({exc})"
+        try:
+            data = json.loads(content)
+        except (ValueError, UnicodeError) as exc:
+            return f"could not parse agy project file {path} ({exc})"
+        if not isinstance(data, dict):
+            return f"agy project file {path} must be a JSON object"
+        for key in data:
+            if key not in {"id", "name", "projectResources"}:
+                return f"agy project file {path} contains unreviewed key: {key}"
+        if "projectResources" in data and data["projectResources"] != {}:
+            return f"agy project file {path} projectResources must be an empty object"
+        checked[path] = hashlib.sha256(content).hexdigest()
+
+    hooks = home / "antigravity-cli" / "hooks.json"
+    try:
+        content = hooks.read_bytes()
+    except FileNotFoundError:
+        if hooks.is_symlink():
+            return f"could not read agy user hooks {hooks}: dangling symlink"
+        checked[hooks] = None
+    except OSError as exc:
+        return f"could not read agy user hooks {hooks} ({exc})"
+    else:
+        try:
+            if content.strip() and json.loads(content) != {}:
+                return f"agy user hooks {hooks} must be empty or an empty JSON object"
+        except (ValueError, UnicodeError) as exc:
+            return f"could not parse agy user hooks {hooks} ({exc})"
+        checked[hooks] = hashlib.sha256(content).hexdigest()
+    return None
 
 
 @dataclass(frozen=True)

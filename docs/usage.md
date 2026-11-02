@@ -2,9 +2,9 @@
 
 [Back to the README](../README.md). Commands run from your repository unless stated otherwise.
 
-The planner defaults to **codex writes / claude reviews**; your model allow-list
-and engine pins choose the route. Usage limits can switch engines in the same
-worktree, and paused tasks continue with **Resume**.
+The planner uses the default writer in your model settings; **claude reviews**.
+Your model allow-list and engine pins choose the route. Usage limits can switch
+engines in the same worktree, and paused tasks continue with **Resume**.
 
 ## Use details
 
@@ -13,7 +13,7 @@ cd /path/to/some/git/repo
 hermes
 ```
 
-Then describe the work. Pin an engine with `@claude` or `@codex`. The planner splits
+Then describe the work. Pin an engine with `@claude`, `@codex`, or `@gemini`. The planner splits
 the work into tasks and runs each one:
 
 - in a worktree at `.worktrees/subagent-control-<run>-<task>`, on branch
@@ -103,6 +103,34 @@ top level), `--json`, or `--out FILE` to write markdown with parent directories
 created. Every section names its source and explains unavailable measurements;
 git metrics are skipped with a note outside a repository.
 
+## Repository diagrams
+
+Ask the planner for a repository's design picture or work flow, or run:
+
+```bash
+hermes control diagram --repo PATH --ask TEXT [--kind KIND]... [--codex-model M] [--claude-model M] [--json]
+```
+
+`--kind` is repeatable, one value per flag: `--kind module --kind flow --kind sequence`.
+Without `--kind`, module and flow views are drawn.
+
+Codex writes the spec, claude reviews it, codex gets one fix round and claude
+reviews again, then claude fixes any remaining problems. The command prints
+the title, summary, review counts and a link opening **Diagrams** in the
+dashboard's Engines tab. `--json` prints the record. Details, review marks and
+cost estimates: [Diagrams view](diagrams-view.md).
+
+Set the dashboard link base in `config.yaml`; the default is
+`http://127.0.0.1:9119`:
+
+```yaml
+plugins:
+  entries:
+    hermes_control:
+      settings:
+        dashboard_url: http://127.0.0.1:9119
+```
+
 ## Models and effort
 
 The model names below are examples; your allow-list decides.
@@ -165,10 +193,13 @@ never holds work back. Codex reads usage through its official `codex app-server`
 Set a cap per engine (default 80%). Then:
 
 - Before each task, an engine over its cap, or stopped by its limit, hands the
-  task to the other engine.
-- A worker that hits a limit part-way is followed by the other engine **in the
-  same worktree**, so nothing it wrote is lost.
-- When neither engine can take a task, it is **paused**. It appears under
+  task to the next usable engine in the user's `routing.fallback` list for its
+  engine, or, when that engine has no list, to the other enabled engines in
+  default order.
+- A worker that hits a limit part-way is followed by the next usable engine in
+  that order **in the same worktree**, so nothing it wrote is lost.
+- When no engine in its fallback order is usable (including an explicit empty
+  list), the task stays on its engine and is **paused**. It appears under
   **Paused tasks** with the reason and when an engine frees up. Press **Resume**
   then: claude picks its own session back up, codex starts a new session in the
   worktree, or the other engine carries on there. Nothing resumes by itself.
@@ -191,6 +222,10 @@ Resume is refused while the run is in progress (an OS lock released when the run
 ends or its process exits, even after a crash). When that lock cannot be checked,
 a run counts as over once it has logged its summary, or after 35 minutes with no
 worker event.
+If the Hermes process ends mid-run, the run's unsettled tasks become paused.
+Resume is refused while the earlier engine still runs; stop it or wait. A gateway
+started with `--idle-exit` can exit during a long run, so keep the CLI open or
+resume afterwards. See [limits-and-resume.md](limits-and-resume.md).
 The plan event records the settings in use. A finished run
 reports `overlaps` when tasks changed the same file from one base. Engines run in
 their own session, so if Hermes itself is killed the OS frees the slot while the
@@ -255,9 +290,116 @@ removes the main worktree, unrelated branches, or detached verify checkouts. A
 Git refusal is reported in the result so you can resolve it and run the command
 again.
 
+## Offline checks
+
+Run `scripts/verify-setup.sh` outside the sandbox before using
+`/bin/sh scripts/sandbox-check.sh`. Setup installs pytest and PyYAML into the Hermes
+home's `control/verify`. A setup made before PyYAML was added must rerun
+`scripts/verify-setup.sh`; `hc-update` does this by itself when the overlay has no
+`yaml`. Unless `HERMES_PYTHON` is set, setup follows
+`hermes --print-runtime-command` to find Hermes's bundled Python and loads
+`hermes_bootstrap` to discover the repo and managed dependency import path.
+It records the interpreter in `control/verify/python-path` and the import path,
+one entry per line, in `control/verify/hermes-path`. Setup builds a symlink farm
+at `control/verify/hermes-src` from the editable finder's `MAPPING` names and
+root Python modules, excluding unmapped `tests` and `scripts` modules. Checks
+replace the repo root with this farm so Hermes's own `tests/` and `scripts/`
+packages cannot shadow this repo's packages. If the farm cannot be built, setup
+and `scripts/check.sh` stop with exit 2: the recorded repo root cannot stand in for
+the farm, because Hermes's own `tests` package would shadow this repo's tests. Setup
+then removes `python-path`, `hermes-path` and the farm. It removes the previous agy
+copy when `HERMES_HOME` is the default home `~/.hermes` (including symlinked or
+trailing-slash spellings) or the copy's stamp records the same Hermes Python that
+setup is using, so agy workers report "not set up" until setup succeeds. Otherwise,
+setup prints that the copy was left in place, naming the other Hermes Python or
+`unknown` when the stamp cannot be read. The Python check compares the stamp
+with the Python setup uses as exact path strings: another spelling of the same
+Python (such as a symlink) keeps the copy, so set `HERMES_PYTHON` to an
+absolute path (the launcher's Python is always absolute). Because one copy is
+shared by every home, when two homes use the same Hermes Python, a failed farm
+under one home also removes the copy the other home still uses; run setup again
+under a home whose farm builds to restore it.
+With `--no-agy-copy`, setup leaves the older copy in place and warns
+that it was built for the previous Hermes. Older launchers fall back
+to the launcher or the install directory reported by `hermes --version`; an
+empty import path removes `hermes-path` and the farm.
+
+For an explicit managed runtime, set `HERMES_PYTHON` to the bundled interpreter
+and `HERMES_PYTHON_PATH` to the Hermes repo root first, then the managed env
+site-packages, colon-separated. That Python imports `hermes_cli` only after
+bootstrap supplies the import path. Older Hermes needs only `HERMES_PYTHON`
+and leaves `HERMES_PYTHON_PATH` empty.
+
+Sandbox checks use the recorded Python and import path with user site-packages
+disabled. `scripts/sandbox-check.sh` uses `$HERMES_HOME` when it holds a
+`control/verify` directory, including after a failed setup; otherwise it uses
+`~/.hermes`. Setup also builds a read-only copy under
+`~/.config/hermes-control/check` for Gemini workers (or
+`$XDG_CONFIG_HOME/hermes-control/check`). This is one copy per user, shared by every
+Hermes home; a successful setup under any `HERMES_HOME` rebuilds it. Re-run setup
+after every Hermes update: the copied interpreter, dependencies and Hermes source
+are a snapshot.
+`scripts/verify-setup.sh --no-agy-copy` installs only primary verify and reports
+any older Gemini copy left in place.
+
+The check prefers primary verify whenever it is readable. The Gemini adapter
+sets `HERMES_CONTROL_CHECK_COPY=1` only in its worker environment. The copy requires
+that exact opt-in, `CODEX_SANDBOX` unset and primary verify unavailable. It leaves
+three public-file Git checks and the real Hermes CLI smoke test to post-commit
+verify, except tests explicitly selected by file or node ID. Post-commit verify
+does not receive the worker's marker and runs in the Codex sandbox, where the
+copy is forbidden even if the marker is present. Without a usable primary or
+permitted copy the original not-set-up error and exit 2 remain. Both paths accept
+pytest arguments, for example `/bin/sh scripts/sandbox-check.sh tests/test_limits.py`.
+
+The copy contains `python/` (the relocatable base CPython), `site/` (pytest,
+PyYAML and selected third-party packages with distribution metadata), `src/` (Hermes editable
+packages listed in the editable finder's `MAPPING` and every root `*.py` module
+in their project directory, identified by `pyproject.toml`, even when the finder
+predates those modules). In managed mode, sources come from the recorded Hermes
+repo root instead of stale paths in the editable finder. A name missing both
+under that root and at its recorded MAPPING location is skipped; a name missing
+under the root but still present at the recorded location fails the build.
+Single-file modules in managed mode skip the extension filter, preserving
+interpreter-specific import suffixes. The copy also contains
+`python-path` and a JSON `stamp` recording the
+source interpreter, base Python version, Hermes Git HEAD when readable and UTC
+build time. Setup builds a staging directory, excludes `.env*`, `*.env`, `.git`,
+`tests`, `node_modules` and `__pycache__` below each copy root, and restricts Hermes
+package files to `.py`, `.pyi`, `.so`, `.dylib`, `.json`, `.yaml`, `.yml`, `.toml`,
+`.txt`, `.md` and `.typed`. It scans with both the copy's original secret rules
+and the plugin's rules, smoke-tests imports (including `hermes_state` and
+`hermes_state_common`) with the staged interpreter and
+removes write permissions before replacing the previous copy. A failed copy rebuild
+preserves the previous copy; a failed promotion restores it. A failed Hermes source
+farm removes the previous copy when `HERMES_HOME` is the default home `~/.hermes`
+(including symlinked or trailing-slash spellings) or the copy was built by the same
+Hermes Python, so agy workers also get "not set up". Otherwise, setup prints that
+the copy was left in place. `--no-agy-copy` always leaves it in place with a warning.
+Secret findings
+report only file paths and rule names. No downloads occur during a worker's check.
+
+After a dependency change, refresh `scripts/agy-check-packages.txt` against the
+imports of the full suite on primary verify:
+
+```sh
+/bin/sh scripts/sandbox-check.sh -p scripts.agy_check_imports
+```
+
+The plugin prints third-party import roots from `sys.modules` at session end.
+Review its output against the list: keep the suite's third-party roots, omitting
+pytest, PyYAML (`yaml`) and their dependencies already supplied by the verify site. Include imports
+observed on other supported platforms too. Setup resolves each listed import from
+Hermes's site-packages, including namespace packages and extension modules, and
+fails with the names of missing packages. Update Hermes's environment or correct
+the list, then re-run setup; listing a dependency never installs it into Hermes.
+
 ## Evaluate routing
 
-`HERMES_PYTHON` is the interpreter Hermes runs on; it needs PyYAML.
+`HERMES_PYTHON` is the interpreter Hermes runs on; `scripts/eval/analyze.py`
+imports `yaml`, which `scripts/verify-setup.sh` installs into
+`$HERMES_HOME/control/verify/site` (add it to `PYTHONPATH` when `HERMES_PYTHON`
+lacks PyYAML).
 Run `scripts/verify-setup.sh` once so the write probes can fill their `{verify}`
 placeholder with the sandbox-ready pytest command. Preview the six quota-consuming
 probes with `"$HERMES_PYTHON" scripts/eval/run.py --dry-run`.
@@ -265,10 +407,11 @@ Run them with `"$HERMES_PYTHON" scripts/eval/run.py --live --out /tmp/routing-be
 `"$HERMES_PYTHON" scripts/eval/analyze.py /tmp/routing-before` for a table and
 `analysis.json`. Repeat with another output directory after changing planner-facing
 text and compare the JSON files. The runner uses a temporary Hermes profile under
-the source home's `profiles/` directory. It copies config and `.env`, symlinks the
-control plugin and skill, and never copies credentials or `auth.json`. Before
-removing the profile, it copies run logs and `state.db` into the output directory;
-use `--keep-home` to retain the profile. The analyser reads those copies read-only;
+the source home's `profiles/` directory. It copies `config.yaml` and `.env` into
+the throwaway profile, which is removed at the end unless `--keep-home` is set,
+and symlinks the control plugin and skill. It copies `config.yaml`, run logs and `state.db`
+(the planner's conversation history) into the `--out` directory, and never copies
+`auth.json`. The analyser reads those copies read-only;
 each prompt uses a fresh disposable git repo. Each JSON
 row lists every matched run and task, with attempts, actual routes, controller
 outcomes, verification exits, and an explicit per-prompt aggregate. A run that

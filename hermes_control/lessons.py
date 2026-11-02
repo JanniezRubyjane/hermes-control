@@ -26,7 +26,7 @@ from rich.table import Table
 
 from . import worker_report
 from .events import ControlEvent
-from .review_pack import _unbacked_claims
+from .review_pack import _command_input, _unbacked_claims
 
 LEVELS = {
     "verify_failure": "test", "claude_permission": "architecture",
@@ -145,9 +145,8 @@ def build(since: float = 30, *, min_count: int = 2, limit: int | None = None,
         payload = event.payload
         identity = (event.run_id, event.task_id)
         if event.kind == "tool_start":
-            tool_input = payload.get("input")
-            command = tool_input.get("command") if isinstance(tool_input, dict) else None
-            if isinstance(command, str):
+            command = _command_input(payload)
+            if command is not None:
                 command_events[event.run_id].append(event)
                 starts[(*identity, str(payload.get("tool_id")))] = command
         elif event.kind == "summary":

@@ -1,0 +1,26 @@
+# Third-party import roots observed by scripts.agy_check_imports (see docs/usage.md).
+annotated_doc
+annotated_types
+anyio
+attr
+certifi
+charset_normalizer
+click
+fastapi
+httpx
+httpx2
+idna
+jiter
+psutil
+ptyprocess
+pydantic
+pydantic_core
+python_multipart
+requests
+rich
+ruamel
+sniffio
+starlette
+typing_extensions
+typing_inspection
+urllib3
